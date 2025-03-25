@@ -173,3 +173,21 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+
+
+
+
+
+# קבצי מערכת
+.DS_Store
+Thumbs.db
+
+# קבצים זמניים
+*.tmp
+*.log
+
+# תיקיות שלא צריכות להיות ב-Git
+/node_modules
+/dist
+/temp
