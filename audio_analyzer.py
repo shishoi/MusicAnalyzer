@@ -3,8 +3,9 @@ import librosa
 import numpy as np
 import matplotlib.pyplot as plt
 from pydub import AudioSegment
-from pydub.utils import make_chunks
-
+from datetime import datetime
+import shutil
+import xml.etree.ElementTree as ET
 
 class AudioAnalyzer:
     def __init__(self, file_path):
@@ -20,7 +21,9 @@ class AudioAnalyzer:
         self.tempo = None
         self.key = None
         self.camelot_key = None
-        self.cue_points = []
+        self.traktor_key = None
+        self.traktor_key_text = None
+        self.cue_points = {}
         
         # Load the file
         self._load_audio()
@@ -85,6 +88,121 @@ class AudioAnalyzer:
         except Exception as e:
             print(f"Error detecting key: {e}")
             return None
+    
+    def detect_cue_points(self, sensitivity=1.0):
+        """
+        Detect four main CUE points in a track:
+        1. Intro - beginning of the track
+        2. Build-up - musical development
+        3. Chorus/Drop - main section
+        4. Outro - end/transition section
+        
+        Args:
+            sensitivity (float): Sensitivity for change detection (1.0 is normal)
+        
+        Returns:
+            dict: Dictionary with 4 main CUE points (time in seconds)
+        """
+        if self.y is None:
+            print("No audio file loaded.")
+            return {}
+        
+        try:
+            # Get song length
+            song_length = len(self.y) / self.sr
+            
+            # 1. Analyze energy and rhythm
+            onset_env = librosa.onset.onset_strength(y=self.y, sr=self.sr)
+            tempo, beats = librosa.beat.beat_track(onset_envelope=onset_env, sr=self.sr)
+            beat_times = librosa.frames_to_time(beats, sr=self.sr)
+            
+            # 2. Calculate RMS energy throughout the song
+            hop_length = 512
+            rms = librosa.feature.rms(y=self.y, hop_length=hop_length)[0]
+            times = librosa.times_like(rms, sr=self.sr, hop_length=hop_length)
+            
+            # 3. Detect significant changes in energy
+            # Divide song into segments
+            num_segments = 100
+            segment_length = len(rms) // num_segments
+            segment_energies = []
+            
+            for i in range(num_segments):
+                start = i * segment_length
+                end = start + segment_length
+                if end <= len(rms):
+                    segment_energies.append(np.mean(rms[start:end]))
+            
+            # 4. Identify significant changes
+            # Create a list of significant changes
+            changes = []
+            for i in range(1, len(segment_energies)):
+                change = segment_energies[i] - segment_energies[i-1]
+                changes.append((i, change))
+            
+            # Sort changes by magnitude (largest to smallest)
+            significant_changes = sorted(changes, key=lambda x: abs(x[1]), reverse=True)
+            
+            # 5. Identify CUE points based on changes
+            # Intro: beginning of the song, typically just after the very start
+            intro_time = min(10.0, song_length * 0.05)  # or 5% into the song, whichever is earlier
+            
+            # Find the drop/chorus - significant positive change in energy
+            positive_changes = [c for c in significant_changes if c[1] > 0]
+            # Typically the drop is between 25% and 50% of the song
+            likely_drops = [c for c in positive_changes if 0.2 <= (c[0]/num_segments) <= 0.6]
+            
+            if likely_drops:
+                drop_segment = likely_drops[0][0]  # Most significant positive change
+                drop_time = drop_segment * song_length / num_segments
+            else:
+                drop_time = song_length * 0.35  # Default: 35% into the song
+            
+            # Build-up: before the drop
+            # Typically 15-30 seconds before the drop
+            build_time = max(intro_time + 10, drop_time - 20)
+            
+            # Outro: towards end of song
+            outro_time = song_length * 0.85  # 85% into the song
+            
+            # Make sure points are reasonable and not overlapping
+            min_distance = 10  # Minimum distance between CUE points (in seconds)
+            
+            # Adjust points that are too close
+            if build_time - intro_time < min_distance:
+                build_time = intro_time + min_distance
+            
+            if drop_time - build_time < min_distance:
+                drop_time = build_time + min_distance
+            
+            if outro_time - drop_time < min_distance:
+                outro_time = drop_time + min_distance
+            
+            # Store CUE points
+            self.cue_points = {
+                'intro': intro_time,
+                'build': build_time,
+                'drop': drop_time,
+                'outro': outro_time
+            }
+            
+            print(f"Found 4 CUE points:")
+            print(f"Intro: {self._format_time(intro_time)}")
+            print(f"Build: {self._format_time(build_time)}")
+            print(f"Drop: {self._format_time(drop_time)}")
+            print(f"Outro: {self._format_time(outro_time)}")
+            
+            return self.cue_points
+            
+        except Exception as e:
+            print(f"Error detecting CUE points: {e}")
+            return {}
+    
+    def _format_time(self, seconds):
+        """Format time in seconds nicely"""
+        minutes = int(seconds // 60)
+        seconds = int(seconds % 60)
+        return f"{minutes:02d}:{seconds:02d}"
     
     def _get_traktor_notation(self, key_name):
         """
@@ -219,175 +337,11 @@ class AudioAnalyzer:
         
         # If major correlation is higher, the song is in major
         return max_major_corr > max_minor_corr
-    
-    def detect_cue_points(self, sensitivity=1.0, min_silence_len=1000):
-        """
-        Detect automatic CUE points
-        
-        Args:
-            sensitivity (float): Sensitivity for change detection (1.0 is normal)
-            min_silence_len (int): Minimum silence length in milliseconds
-        
-        Returns:
-            list: List of CUE points (time in seconds)
-        """
-        if self.y is None:
-            print("No audio file loaded.")
-            return []
-        
-        try:
-            # Detect changes in volume - start points of beats
-            onset_env = librosa.onset.onset_strength(y=self.y, sr=self.sr)
-            onset_frames = librosa.onset.onset_detect(onset_envelope=onset_env, sr=self.sr)
-            
-            # Detect significant points in the song
-            onset_times = librosa.frames_to_time(onset_frames, sr=self.sr)
-            
-            # Extract only the most significant points
-            # (for example: if there are many points, select only those with significant change)
-            if len(onset_times) > 20:  # If there are too many points
-                # Calculate the strength of change at each point
-                onset_strengths = onset_env[onset_frames]
-                
-                # Sort points by strength of change
-                strong_onsets_idx = np.argsort(onset_strengths)[-20:]  # 20 strongest points
-                onset_times = onset_times[strong_onsets_idx]
-            
-            # Detect silence (for end/start of sections)
-            silent_sections = self._detect_silence(None, min_silence_len, -40)
-            
-            # Combine all points
-            all_points = list(onset_times)
-            
-            # Add start/end points of silent sections
-            for start, end in silent_sections:
-                all_points.append(start / 1000.0)  # Convert from milliseconds to seconds
-                all_points.append(end / 1000.0)
-            
-            # Add points at fixed times (every 30 seconds)
-            song_length = len(self.y) / self.sr
-            for t in range(0, int(song_length), 30):
-                all_points.append(float(t))
-            
-            # Sort and remove duplicates
-            all_points = sorted(set(all_points))
-            
-            # Filter points that are too close
-            min_distance = 15.0  # Minimum distance in seconds (increased to 15 seconds)
-            filtered_points = []
-            if all_points:  # Check that the array is not empty
-                filtered_points = [all_points[0]]
-                for point in all_points[1:]:
-                    if point - filtered_points[-1] >= min_distance:
-                        filtered_points.append(point)
-            
-            self.cue_points = filtered_points
-            print(f"Found {len(self.cue_points)} CUE points")
-            
-            return self.cue_points
-        except Exception as e:
-            print(f"Error detecting CUE points: {e}")
-            return []
-    
-    def _detect_silence(self, audio, min_silence_len, silence_thresh):
-        """Detect silent sections in the audio file"""
-        silence_sections = []
-        try:
-            # Use a simpler approach to detect silence
-            # Divide audio into short segments and detect noise level in each segment
-            chunk_length_ms = 500  # Segment length in milliseconds
-            chunk_size = int(self.sr * chunk_length_ms / 1000)
-            
-            # Number of segments
-            num_chunks = len(self.y) // chunk_size
-            
-            # Check noise level in each segment
-            silent_chunks = []
-            for i in range(num_chunks):
-                start = i * chunk_size
-                end = start + chunk_size
-                chunk = self.y[start:end]
-                
-                # Calculate noise level
-                energy = np.mean(np.abs(chunk))
-                
-                # If the level is below threshold, it's a silent segment
-                if energy < 0.01:  # Low threshold adjusted for sensitivity
-                    silent_chunks.append(i)
-            
-            # Combine consecutive silent segments
-            silence_start = None
-            for i in range(len(silent_chunks)):
-                if i == 0 or silent_chunks[i] > silent_chunks[i-1] + 1:
-                    if silence_start is not None:
-                        # Convert to time in milliseconds
-                        start_ms = silence_start * chunk_length_ms
-                        end_ms = silent_chunks[i-1] * chunk_length_ms + chunk_length_ms
-                        if end_ms - start_ms >= min_silence_len:
-                            silence_sections.append((start_ms, end_ms))
-                    silence_start = silent_chunks[i]
-                
-                if i == len(silent_chunks) - 1 and silence_start is not None:
-                    # Handle the last silent segment
-                    start_ms = silence_start * chunk_length_ms
-                    end_ms = silent_chunks[i] * chunk_length_ms + chunk_length_ms
-                    if end_ms - start_ms >= min_silence_len:
-                        silence_sections.append((start_ms, end_ms))
-            
-            return silence_sections
-        except Exception as e:
-            print(f"Error detecting silence: {e}")
-            return []
-    
-    def export_cue_sheet(self, output_file=None):
-        """
-        Create a CUE file
-        
-        Args:
-            output_file (str): Path to output file (if None, will use original filename)
-        
-        Returns:
-            str: Path to the created CUE file
-        """
-        if not self.cue_points:
-            print("No CUE points detected. Run detect_cue_points first.")
-            return None
-        
-        if output_file is None:
-            base_name = os.path.splitext(self.file_path)[0]
-            output_file = f"{base_name}.cue"
-        
-        try:
-            # Create CUE file
-            file_name = os.path.basename(self.file_path)
-            with open(output_file, 'w', encoding='utf-8') as f:
-                f.write(f'TITLE "Automatic CUE Sheet"\n')
-                f.write(f'FILE "{file_name}" WAVE\n')
-                
-                for i, time in enumerate(self.cue_points):
-                    # Convert time to MM:SS:FF format (minutes:seconds:frames)
-                    minutes = int(time // 60)
-                    seconds = int(time % 60)
-                    frames = int((time % 1) * 75)  # 75 frames per second in CUE format
-                    
-                    f.write(f'  TRACK {i+1:02d} AUDIO\n')
-                    f.write(f'    TITLE "Track {i+1}"\n')
-                    f.write(f'    INDEX 01 {minutes:02d}:{seconds:02d}:{frames:02d}\n')
-            
-            print(f"CUE file created successfully: {output_file}")
-            return output_file
-        except Exception as e:
-            print(f"Error creating CUE file: {e}")
-            return None
-    
+
     def plot_waveform_with_cues(self):
         """Display waveform with marked CUE points"""
         if self.y is None:
             print("No audio file loaded.")
-            return
-        
-        if not self.cue_points:
-            print("No CUE points detected. Run detect_cue_points first.")
             return
         
         plt.figure(figsize=(15, 5))
@@ -395,18 +349,142 @@ class AudioAnalyzer:
         # Display waveform
         plt.plot(np.linspace(0, len(self.y)/self.sr, len(self.y)), self.y, alpha=0.5)
         
-        # Mark CUE points
-        for cue in self.cue_points:
-            plt.axvline(x=cue, color='r', linestyle='--', alpha=0.7)
+        # Mark CUE points if they exist
+        if self.cue_points:
+            colors = {'intro': 'g', 'build': 'y', 'drop': 'r', 'outro': 'b'}
+            for cue_type, time in self.cue_points.items():
+                plt.axvline(x=time, color=colors.get(cue_type, 'r'), linestyle='--', alpha=0.7, 
+                           label=f"{cue_type.capitalize()}: {self._format_time(time)}")
         
         plt.title('Waveform with CUE Points')
         plt.xlabel('Time (s)')
         plt.ylabel('Amplitude')
+        plt.legend()
         plt.tight_layout()
         plt.show()
 
 
-# Function to find duplicate songs
+class TraktorNMLEditor:
+    def __init__(self, nml_path):
+        """
+        Module for safely editing Traktor NML files
+        
+        Args:
+            nml_path (str): Path to collection.nml file
+        """
+        self.nml_path = nml_path
+        self.backup_dir = os.path.join(os.path.dirname(nml_path), "backups")
+        
+        # Create backup directory if it doesn't exist
+        if not os.path.exists(self.backup_dir):
+            os.makedirs(self.backup_dir)
+    
+    def backup_collection(self):
+        """Create a backup of the current Collection file"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = os.path.join(self.backup_dir, f"collection_backup_{timestamp}.nml")
+        
+        shutil.copy2(self.nml_path, backup_path)
+        print(f"Created backup at: {backup_path}")
+        
+        return backup_path
+    
+    def add_cue_points(self, audio_path, cue_points, cue_names=None):
+        """
+        Add CUE points to a specific track
+        
+        Args:
+            audio_path (str): Path to the audio file
+            cue_points (dict): Dictionary with CUE types and times in seconds
+            cue_names (dict, optional): Custom names for CUE points
+        
+        Returns:
+            bool: Whether the operation was successful
+        """
+        # Back up before any changes
+        self.backup_collection()
+        
+        try:
+            # Read the file
+            tree = ET.parse(self.nml_path)
+            root = tree.getroot()
+            
+            # Find the specific file
+            audio_filename = os.path.basename(audio_path)
+            entry_found = False
+            
+            for entry in root.findall(".//ENTRY"):
+                location = entry.find("LOCATION")
+                if location is not None:
+                    file = location.get("FILE")
+                    if file and file.lower() == audio_filename.lower():
+                        entry_found = True
+                        
+                        # Convert times to Traktor format (milliseconds)
+                        traktor_cues = {
+                            'intro': int(cue_points['intro'] * 1000),
+                            'build': int(cue_points['build'] * 1000),
+                            'drop': int(cue_points['drop'] * 1000),
+                            'outro': int(cue_points['outro'] * 1000)
+                        }
+                        
+                        # Default names if custom names not provided
+                        if cue_names is None:
+                            cue_names = {
+                                'intro': "Intro",
+                                'build': "Build",
+                                'drop': "Drop",
+                                'outro': "Outro"
+                            }
+                        
+                        # Remove existing CUE points with the same names
+                        for cue in list(entry.findall("CUE_V2")):
+                            name = cue.get("NAME")
+                            if name in cue_names.values():
+                                entry.remove(cue)
+                        
+                        # Add new CUE points
+                        for i, (cue_type, start_time) in enumerate(traktor_cues.items()):
+                            cue = ET.SubElement(entry, "CUE_V2")
+                            cue.set("NAME", cue_names[cue_type])
+                            cue.set("DISPL_ORDER", str(i))
+                            cue.set("TYPE", "0")  # 0 = Hot Cue
+                            cue.set("START", str(start_time))
+                            cue.set("LEN", "0")  # Single point, not a section
+                            cue.set("REPEATS", "-1")
+                            cue.set("HOTCUE", str(i+1))  # Hot Cue number (1-8)
+                
+            if not entry_found:
+                print(f"File {audio_filename} not found in Traktor collection")
+                return False
+            
+            # Save temporary file
+            temp_path = self.nml_path + ".temp"
+            tree.write(temp_path, encoding="UTF-8", xml_declaration=True)
+            
+            # Validate
+            try:
+                check_tree = ET.parse(temp_path)
+                valid_xml = True
+            except:
+                valid_xml = False
+            
+            if valid_xml:
+                # Replace original file
+                os.replace(temp_path, self.nml_path)
+                print(f"Successfully updated: {audio_filename}")
+                return True
+            else:
+                os.remove(temp_path)
+                print("XML validation failed")
+                return False
+            
+        except Exception as e:
+            print(f"Error updating NML file: {str(e)}")
+            return False
+
+
+# Functions for finding duplicate songs 
 def find_duplicate_songs(directory, tolerance_sec=3.0, progress_callback=None):
     """
     Find duplicate songs using a faster multi-factor approach
@@ -629,8 +707,6 @@ def find_duplicate_songs(directory, tolerance_sec=3.0, progress_callback=None):
     
     return duplicates
 
-
-
 def print_duplicate_groups(duplicates):
     """Print duplicate groups in a readable format"""
     if not duplicates:
@@ -676,50 +752,4 @@ def analyze_audio_file(file_path):
     bpm = analyzer.analyze_bpm()
     key = analyzer.analyze_key()
     
-    # Detect CUE points
-    print("\nDetecting CUE points...")
-    cue_points = analyzer.detect_cue_points(sensitivity=1.2)
-    
-    # Display points
-    if cue_points:
-        print("\nDetected CUE points (in seconds):")
-        for i, point in enumerate(cue_points):
-            minutes = int(point // 60)
-            seconds = int(point % 60)
-            print(f"  {i+1:2d}: {minutes:02d}:{seconds:02d}")
-    
-    # Create CUE file
-    cue_file = analyzer.export_cue_sheet()
-    
-    print("\nSummary:")
-    print(f"BPM: {bpm:.1f}" if bpm else "BPM: not detected")
-    print(f"KEY: {key}" if key else "KEY: not detected")
-    print(f"CUE points: {len(cue_points)}")
-    print(f"CUE file: {cue_file}" if cue_file else "CUE file: not created")
-    
-    # Visual display
-    analyzer.plot_waveform_with_cues()
-
-# Example usage
-if __name__ == "__main__":
-    import sys
-    
-    if len(sys.argv) < 2:
-        print("Usage:")
-        print("  For single file analysis: python audio_analyzer.py path/to/song.mp3")
-        print("  To find duplicates: python audio_analyzer.py --find-duplicates path/to/music/directory [tolerance_sec]")
-        sys.exit(1)
-    
-    if sys.argv[1] == "--find-duplicates":
-        if len(sys.argv) < 3:
-            print("Please provide a path to the music directory")
-            sys.exit(1)
-        
-        directory = sys.argv[2]
-        tolerance_sec = float(sys.argv[3]) if len(sys.argv) > 3 else 3.0
-        
-        duplicates = find_duplicate_songs(directory, tolerance_sec)
-        print_duplicate_groups(duplicates)
-    else:
-        file_path = sys.argv[1]
-        analyze_audio_file(file_path)
+    # Detect CU
