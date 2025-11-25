@@ -672,6 +672,15 @@ class AudioAnalyzerGUI:
         if not path:
             messagebox.showinfo("Info", "Selected row has no file path.")
             return
+        
+        # Normalize path
+        path = os.path.normpath(path)
+        
+        # Verify file exists
+        if not os.path.exists(path) or not os.path.isfile(path):
+            messagebox.showerror("File Error", f"File not found or is not a file:\n{path}")
+            return
+        
         self.play_label.config(text=os.path.basename(path))
         if not self.vlc_available or self.vlc_player is None:
             messagebox.showwarning("Playback unavailable", "python-vlc is not available. Install 'python-vlc' and ensure VLC/libvlc is installed on your system.")
