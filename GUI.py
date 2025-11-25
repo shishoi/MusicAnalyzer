@@ -16,6 +16,36 @@ except Exception:
     _vlc_available = False
 
 
+class ToolTip:
+    """Simple tooltip class for tkinter widgets."""
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tipwindow = None
+        self.id = None
+        self.x = self.y = 0
+        widget.bind("<Enter>", self.showtip, add="+")
+        widget.bind("<Leave>", self.hidetip, add="+")
+
+    def showtip(self, event=None):
+        """Display the tooltip."""
+        if self.tipwindow or not self.text:
+            return
+        x = self.widget.winfo_rootx() + 50
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 10
+        self.tipwindow = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        label = tk.Label(tw, text=self.text, background="#ffffe0", relief=tk.SOLID, borderwidth=1, font=("tahoma", 9, "normal"))
+        label.pack(ipadx=1)
+
+    def hidetip(self, event=None):
+        """Hide the tooltip."""
+        if self.tipwindow:
+            self.tipwindow.destroy()
+            self.tipwindow = None
+
+
 class AudioAnalyzerGUI:
     def __init__(self, root):
         self.root = root
@@ -53,6 +83,10 @@ class AudioAnalyzerGUI:
             state=tk.DISABLED  # Initially disabled
         )
         self.save_button.pack(side=tk.LEFT, padx=5)
+        
+        # Add tooltip to Save Changes button
+        save_tooltip_text = "Saves analysis results:\n- MP3 tags: Title, BPM, Key\n- Traktor CUE points: Intro, Build, Drop, Outro"
+        ToolTip(self.save_button, save_tooltip_text)
         
         self.find_duplicates_button = ttk.Button(
             self.button_frame, 
