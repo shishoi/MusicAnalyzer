@@ -25,6 +25,9 @@ class AudioAnalyzerGUI:
         # Dictionary to store analysis results
         self.analysis_results = {}
         
+        # Track current mode: 'analyze' or 'duplicates'
+        self.current_mode = None
+        
         # Create main frame
         self.main_frame = ttk.Frame(root, padding="10")
         self.main_frame.pack(fill=tk.BOTH, expand=True)
@@ -119,9 +122,15 @@ class AudioAnalyzerGUI:
         scrollbar_x = ttk.Scrollbar(self.table_frame, orient="horizontal")
         scrollbar_x.pack(side=tk.BOTTOM, fill=tk.X)
         
-        # Create columns (used for both analysis and duplicate results)
-        # Columns: file path, title, contributing artists, bit rate, length, size (MB), BPM, year
-        columns = ("filepath", "title", "artists", "bitrate", "length", "size_mb", "BPM", "year")
+        # Columns for "Analyze Files" mode
+        self.analyze_columns = ("filepath", "orig_bpm", "analyzed_bpm", "key", "traktor_key", "intro", "build", "drop", "outro")
+        
+        # Columns for "Find Duplicates" mode
+        self.duplicates_columns = ("filepath", "title", "artists", "bitrate", "length", "size_mb", "BPM", "year")
+        
+        # Start with duplicates columns (neutral default)
+        columns = self.duplicates_columns
+        
         self.tree = ttk.Treeview(
             self.table_frame,
             columns=columns,
@@ -134,6 +143,57 @@ class AudioAnalyzerGUI:
         # Configure scrollbars
         scrollbar_y.config(command=self.tree.yview)
         scrollbar_x.config(command=self.tree.xview)
+        
+        # Define headings for duplicates mode (will be overridden when switching modes)
+        self._setup_duplicates_columns()
+        
+        # Pack treeview
+        self.tree.pack(fill=tk.BOTH, expand=True)
+        
+        # Enable editing on double-click
+        self.tree.bind("<Double-1>", self.on_cell_double_click)
+        # Bind Delete key to deletion handler
+        self.tree.bind("<Delete>", lambda e: self.delete_selected_files())
+    
+    def _setup_analyze_columns(self):
+        """Set up columns for Analyze Files mode."""
+        # Remove existing columns
+        for col in self.tree["columns"]:
+            self.tree.column(col, width=0, stretch=tk.NO)
+        
+        # Reconfigure with analyze columns
+        self.tree.configure(columns=self.analyze_columns)
+        
+        # Define headings
+        self.tree.heading("filepath", text="File Path")
+        self.tree.heading("orig_bpm", text="Original BPM")
+        self.tree.heading("analyzed_bpm", text="Analyzed BPM")
+        self.tree.heading("key", text="KEY")
+        self.tree.heading("traktor_key", text="TRAKTOR KEY")
+        self.tree.heading("intro", text="Intro")
+        self.tree.heading("build", text="Build")
+        self.tree.heading("drop", text="Drop")
+        self.tree.heading("outro", text="Outro")
+        
+        # Define columns width
+        self.tree.column("filepath", width=400)
+        self.tree.column("orig_bpm", width=100)
+        self.tree.column("analyzed_bpm", width=100)
+        self.tree.column("key", width=80)
+        self.tree.column("traktor_key", width=100)
+        self.tree.column("intro", width=80)
+        self.tree.column("build", width=80)
+        self.tree.column("drop", width=80)
+        self.tree.column("outro", width=80)
+    
+    def _setup_duplicates_columns(self):
+        """Set up columns for Find Duplicates mode."""
+        # Remove existing columns
+        for col in self.tree["columns"]:
+            self.tree.column(col, width=0, stretch=tk.NO)
+        
+        # Reconfigure with duplicates columns
+        self.tree.configure(columns=self.duplicates_columns)
         
         # Define headings
         self.tree.heading("filepath", text="File Path")
@@ -154,14 +214,7 @@ class AudioAnalyzerGUI:
         self.tree.column("size_mb", width=30)
         self.tree.column("BPM", width=30)
         self.tree.column("year", width=30)
-        
-        # Pack treeview
-        self.tree.pack(fill=tk.BOTH, expand=True)
-        
-        # Enable editing on double-click
-        self.tree.bind("<Double-1>", self.on_cell_double_click)
-        # Bind Delete key to deletion handler
-        self.tree.bind("<Delete>", lambda e: self.delete_selected_files())
+    
     
     def on_cell_double_click(self, event):
         """Handle double-click on a cell to edit the value"""
@@ -255,6 +308,10 @@ class AudioAnalyzerGUI:
             self.status_var.set("Analyzing files...")
             self.progress_var.set(0)
             
+            # Switch to analyze mode columns
+            self.current_mode = 'analyze'
+            self._setup_analyze_columns()
+            
             # Clear the table
             for item in self.tree.get_children():
                 self.tree.delete(item)
@@ -281,30 +338,36 @@ class AudioAnalyzerGUI:
                 intro_time = self._format_time(cue_points.get('intro', 0))
                 build_time = self._format_time(cue_points.get('build', 0))
                 drop_time = self._format_time(cue_points.get('drop', 0))
+                outro_time = self._format_time(cue_points.get('outro', 0))
+                
+                # Get original BPM from file tags
+                meta = self._get_file_metadata(file_path)
+                orig_bpm = meta.get('bpm') or ""
                 
                 # Store results (keep minimal structured data)
                 self.analysis_results[file_path] = {
                     'title': os.path.basename(file_path),
                     'bpm': bpm,
+                    'key': key,
+                    'traktor_key': analyzer.traktor_key,
+                    'traktor_key_text': analyzer.traktor_key_text,
                     'cue_points': cue_points
                 }
 
-                # Get file metadata for display
-                meta = self._get_file_metadata(file_path)
-
-                # Add to table: filepath, title, artists, bitrate, length, size_mb, BPM, year
+                # Add to table: filepath, orig_bpm, analyzed_bpm, key, traktor_key, intro, build, drop, outro
                 self.tree.insert(
                     "", 
                     tk.END, 
                     values=(
                         file_path,
-                        meta.get('title') or os.path.basename(file_path),
-                        meta.get('artists') or "",
-                        meta.get('bitrate') or "",
-                        meta.get('length') or "",
-                        meta.get('size_mb') or "",
-                        f"{bpm:.1f}" if bpm else (meta.get('bpm') or ""),
-                        meta.get('year') or ""
+                        orig_bpm,
+                        f"{bpm:.1f}" if bpm else "",
+                        key or "",
+                        analyzer.traktor_key_text or "",
+                        intro_time,
+                        build_time,
+                        drop_time,
+                        outro_time
                     )
                 )
                 
@@ -667,6 +730,10 @@ class AudioAnalyzerGUI:
             from audio_analyzer import find_duplicate_songs
             self.status_var.set(f"Scanning directory for duplicates: {directory}")
             self.progress_var.set(0)
+            
+            # Switch to duplicates mode columns
+            self.current_mode = 'duplicates'
+            self._setup_duplicates_columns()
             
             # Clear the table
             for item in self.tree.get_children():
