@@ -7,6 +7,11 @@ from datetime import datetime
 import shutil
 import xml.etree.ElementTree as ET
 
+""" 
+Audio and music analysis - BPM, Key, CUE points
+Detect and write new cues points into Traktor files (NML) 
+"""
+
 class AudioAnalyzer:
     def __init__(self, file_path):
         """
