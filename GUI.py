@@ -7,6 +7,14 @@ import threading
 # Import required modules
 from audio_analyzer import AudioAnalyzer, TraktorNMLEditor, find_duplicate_songs
 
+# Optional: VLC-based playback support (python-vlc)
+try:
+    import vlc
+    _vlc_available = True
+except Exception:
+    vlc = None
+    _vlc_available = False
+
 
 class AudioAnalyzerGUI:
     def __init__(self, root):
@@ -51,6 +59,16 @@ class AudioAnalyzerGUI:
         )
         self.find_duplicates_button.pack(side=tk.LEFT, padx=5)
 
+        # Button to delete selected files (enabled when duplicate results shown)
+        self.delete_selected_button = ttk.Button(
+            self.button_frame,
+            text="Delete Selected",
+            command=self.delete_selected_files,
+            width=20,
+            state=tk.DISABLED
+        )
+        self.delete_selected_button.pack(side=tk.LEFT, padx=5)
+
         # Create table frame
         self.table_frame = ttk.Frame(self.main_frame)
         self.table_frame.pack(fill=tk.BOTH, expand=True, pady=10)
@@ -72,7 +90,27 @@ class AudioAnalyzerGUI:
         self.status_var.set("Ready")
         self.status_bar = ttk.Label(root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
-    
+
+        # Initialize playback controls and VLC player (if available)
+        try:
+            self._init_playback_controls()
+        except Exception:
+            pass
+
+        # VLC player setup
+        self.vlc_available = _vlc_available
+        if self.vlc_available:
+            try:
+                self.vlc_instance = vlc.Instance()
+                self.vlc_player = self.vlc_instance.media_player_new()
+            except Exception:
+                self.vlc_available = False
+                self.vlc_instance = None
+                self.vlc_player = None
+        else:
+            self.vlc_instance = None
+            self.vlc_player = None
+
     def create_treeview(self):
         # Scrollbar
         scrollbar_y = ttk.Scrollbar(self.table_frame, orient="vertical")
@@ -81,12 +119,14 @@ class AudioAnalyzerGUI:
         scrollbar_x = ttk.Scrollbar(self.table_frame, orient="horizontal")
         scrollbar_x.pack(side=tk.BOTTOM, fill=tk.X)
         
-        # Create columns
-        columns = ("filepath", "title", "bpm", "key", "key_text", "intro", "buildup", "drop")
+        # Create columns (used for both analysis and duplicate results)
+        # Columns: file path, title, contributing artists, bit rate, length, size (MB), BPM, year
+        columns = ("filepath", "title", "artists", "bitrate", "length", "size_mb", "BPM", "year")
         self.tree = ttk.Treeview(
             self.table_frame,
             columns=columns,
             show="headings",
+            selectmode="extended",
             yscrollcommand=scrollbar_y.set,
             xscrollcommand=scrollbar_x.set
         )
@@ -98,28 +138,30 @@ class AudioAnalyzerGUI:
         # Define headings
         self.tree.heading("filepath", text="File Path")
         self.tree.heading("title", text="Title")
-        self.tree.heading("bpm", text="BPM")
-        self.tree.heading("key", text="Key")
-        self.tree.heading("key_text", text="Key Text")
-        self.tree.heading("intro", text="Intro (mm:ss)")
-        self.tree.heading("buildup", text="Buildup (mm:ss)")
-        self.tree.heading("drop", text="Drop (mm:ss)")
+        self.tree.heading("artists", text="Contributing Artists")
+        self.tree.heading("bitrate", text="Bit Rate")
+        self.tree.heading("length", text="Length")
+        self.tree.heading("size_mb", text="Size (MB)")
+        self.tree.heading("BPM", text="BPM")
+        self.tree.heading("year", text="Year")
         
         # Define columns width
-        self.tree.column("filepath", width=300)
-        self.tree.column("title", width=150)
-        self.tree.column("bpm", width=50)
-        self.tree.column("key", width=50)
-        self.tree.column("key_text", width=80)
-        self.tree.column("intro", width=100)
-        self.tree.column("buildup", width=100)
-        self.tree.column("drop", width=100)
+        self.tree.column("filepath", width=400)
+        self.tree.column("title", width=250)
+        self.tree.column("artists", width=180)
+        self.tree.column("bitrate", width=70)
+        self.tree.column("length", width=70)
+        self.tree.column("size_mb", width=80)
+        self.tree.column("BPM", width=50)
+        self.tree.column("year", width=50)
         
         # Pack treeview
         self.tree.pack(fill=tk.BOTH, expand=True)
         
         # Enable editing on double-click
         self.tree.bind("<Double-1>", self.on_cell_double_click)
+        # Bind Delete key to deletion handler
+        self.tree.bind("<Delete>", lambda e: self.delete_selected_files())
     
     def on_cell_double_click(self, event):
         """Handle double-click on a cell to edit the value"""
@@ -199,7 +241,11 @@ class AudioAnalyzerGUI:
         
         if not file_paths:
             return
-        
+        # Disable delete while analyzing
+        try:
+            self.delete_selected_button.config(state=tk.DISABLED)
+        except Exception:
+            pass
         # Start analysis in a separate thread
         threading.Thread(target=self._analyze_files_thread, args=(file_paths,), daemon=True).start()
     
@@ -236,28 +282,29 @@ class AudioAnalyzerGUI:
                 build_time = self._format_time(cue_points.get('build', 0))
                 drop_time = self._format_time(cue_points.get('drop', 0))
                 
-                # Store results
+                # Store results (keep minimal structured data)
                 self.analysis_results[file_path] = {
                     'title': os.path.basename(file_path),
                     'bpm': bpm,
-                    'key': analyzer.traktor_key,
-                    'key_text': analyzer.traktor_key_text,
                     'cue_points': cue_points
                 }
-                
-                # Add to table
+
+                # Get file metadata for display
+                meta = self._get_file_metadata(file_path)
+
+                # Add to table: filepath, title, artists, bitrate, length, size_mb, BPM, year
                 self.tree.insert(
                     "", 
                     tk.END, 
                     values=(
                         file_path,
-                        os.path.basename(file_path),
-                        f"{bpm:.1f}" if bpm else "",
-                        analyzer.traktor_key,
-                        analyzer.traktor_key_text,
-                        intro_time,
-                        build_time,
-                        drop_time
+                        meta.get('title') or os.path.basename(file_path),
+                        meta.get('artists') or "",
+                        meta.get('bitrate') or "",
+                        meta.get('length') or "",
+                        meta.get('size_mb') or "",
+                        f"{bpm:.1f}" if bpm else (meta.get('bpm') or ""),
+                        meta.get('year') or ""
                     )
                 )
                 
@@ -388,6 +435,219 @@ class AudioAnalyzerGUI:
         return f"{minutes:02d}:{secs:02d}"
 
 
+    def _get_file_metadata(self, file_path):
+        """Return metadata for a file: title, bitrate (e.g. '320 kbps'), length (mm:ss), size_mb (string), artists, bpm, year."""
+        meta = {
+            'title': None,
+            'bitrate': None,
+            'length': None,
+            'size_mb': None,
+            'artists': None,
+            'bpm': None,
+            'year': None
+        }
+
+        # Size in MB with 2 decimals
+        try:
+            size_bytes = os.path.getsize(file_path)
+            size_mb = size_bytes / (1024 * 1024)
+            meta['size_mb'] = f"{size_mb:.2f}"
+        except Exception:
+            meta['size_mb'] = ""
+
+        try:
+            from mutagen import File as MutagenFile
+            audio = MutagenFile(file_path, easy=True)
+            info = None
+            try:
+                info = MutagenFile(file_path)
+            except Exception:
+                info = None
+
+            # Title
+            if audio is not None:
+                title = None
+                if 'title' in audio:
+                    try:
+                        title = audio.get('title')[0]
+                    except Exception:
+                        title = None
+                meta['title'] = title
+
+                # Artists
+                artists = None
+                if 'artist' in audio:
+                    try:
+                        artists = ", ".join(audio.get('artist'))
+                    except Exception:
+                        artists = None
+                meta['artists'] = artists
+
+                # Year
+                year = None
+                if 'date' in audio:
+                    try:
+                        year = audio.get('date')[0]
+                    except Exception:
+                        year = None
+                meta['year'] = year
+
+            # Length and bitrate from info (non-easy Mutagen)
+            if info is not None and hasattr(info, 'info') and info.info is not None:
+                try:
+                    length = int(info.info.length)
+                    meta['length'] = self._format_time(length)
+                except Exception:
+                    meta['length'] = None
+
+                # bitrate in bps -> convert to kbps
+                try:
+                    bitrate = getattr(info.info, 'bitrate', None)
+                    if bitrate:
+                        kbps = int(bitrate / 1000)
+                        meta['bitrate'] = f"{kbps} kbps"
+                except Exception:
+                    meta['bitrate'] = None
+
+            # Try to read TBPM (BPM) tag from easy tags if present
+            try:
+                if audio is not None and 'bpm' in audio:
+                    meta['bpm'] = audio.get('bpm')[0]
+                elif audio is not None and 'TBPM' in audio:
+                    meta['bpm'] = audio.get('TBPM')[0]
+            except Exception:
+                pass
+
+        except ImportError:
+            # mutagen not available — set some defaults
+            meta['title'] = os.path.basename(file_path)
+        except Exception:
+            # Any parsing error — be forgiving
+            if not meta.get('title'):
+                meta['title'] = os.path.basename(file_path)
+
+        # Ensure fields are strings (not None)
+        for k in list(meta.keys()):
+            if meta[k] is None:
+                meta[k] = ""
+
+        return meta
+
+
+    def _init_playback_controls(self):
+        """Create single playback control area below the table."""
+        self.playback_frame = ttk.Frame(self.main_frame)
+        self.playback_frame.pack(fill=tk.X, pady=5)
+
+        self.play_label = ttk.Label(self.playback_frame, text="No track selected")
+        self.play_label.pack(side=tk.LEFT, padx=5)
+
+        self.play_pos_var = tk.DoubleVar()
+        self.play_time_var = tk.StringVar(value="00:00/00:00")
+        self._seeking = False
+
+        self.play_button = ttk.Button(self.playback_frame, text="Play", command=self.play_selected_file)
+        self.play_button.pack(side=tk.LEFT, padx=2)
+        self.pause_button = ttk.Button(self.playback_frame, text="Pause", command=self.pause_playback)
+        self.pause_button.pack(side=tk.LEFT, padx=2)
+        self.stop_button = ttk.Button(self.playback_frame, text="Stop", command=self.stop_playback)
+        self.stop_button.pack(side=tk.LEFT, padx=2)
+
+        self.pos_scale = ttk.Scale(self.playback_frame, from_=0, to=100, orient=tk.HORIZONTAL, variable=self.play_pos_var, command=self._on_seek)
+        self.pos_scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6)
+
+        self.time_label = ttk.Label(self.playback_frame, textvariable=self.play_time_var)
+        self.time_label.pack(side=tk.LEFT, padx=5)
+
+        # Disable controls if VLC not available; will be enabled if available
+        if not _vlc_available:
+            self.play_button.config(state=tk.DISABLED)
+            self.pause_button.config(state=tk.DISABLED)
+            self.stop_button.config(state=tk.DISABLED)
+
+    def play_selected_file(self):
+        """Play the currently selected file in the treeview."""
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo("Info", "No file selected to play.")
+            return
+        path = self.tree.set(sel[0], "filepath")
+        if not path:
+            messagebox.showinfo("Info", "Selected row has no file path.")
+            return
+        self.play_label.config(text=os.path.basename(path))
+        if not self.vlc_available or self.vlc_player is None:
+            messagebox.showwarning("Playback unavailable", "python-vlc is not available. Install 'python-vlc' and ensure VLC/libvlc is installed on your system.")
+            return
+        try:
+            media = self.vlc_instance.media_new(path)
+            self.vlc_player.set_media(media)
+            self.vlc_player.play()
+            # start updating position
+            self._update_playback_position()
+        except Exception as e:
+            messagebox.showerror("Playback Error", f"Failed to play file: {e}")
+
+    def pause_playback(self):
+        if not self.vlc_available or self.vlc_player is None:
+            return
+        try:
+            self.vlc_player.pause()
+        except Exception:
+            pass
+
+    def stop_playback(self):
+        if not self.vlc_available or self.vlc_player is None:
+            return
+        try:
+            self.vlc_player.stop()
+            self.play_pos_var.set(0)
+            self.play_time_var.set("00:00/00:00")
+        except Exception:
+            pass
+
+    def _on_seek(self, value):
+        # value is percent 0..100
+        if not self.vlc_available or self.vlc_player is None:
+            return
+        try:
+            if self.vlc_player.get_length() <= 0:
+                return
+            frac = float(value) / 100.0
+            self.vlc_player.set_position(frac)
+        except Exception:
+            pass
+
+    def _update_playback_position(self):
+        if not self.vlc_available or self.vlc_player is None:
+            return
+        try:
+            length = self.vlc_player.get_length()  # ms
+            if length and length > 0:
+                time_ms = self.vlc_player.get_time()
+                if time_ms < 0:
+                    time_ms = 0
+                pos = 0.0
+                try:
+                    pos = (time_ms / length) * 100.0
+                except Exception:
+                    pos = 0.0
+                self.play_pos_var.set(pos)
+                self.play_time_var.set(f"{self._ms_to_mmss(time_ms)}/{self._ms_to_mmss(length)}")
+            # schedule next update
+            self.root.after(500, self._update_playback_position)
+        except Exception:
+            pass
+
+    def _ms_to_mmss(self, ms):
+        try:
+            s = int(ms // 1000)
+            m = s // 60
+            s = s % 60
+            return f"{m:02d}:{s:02d}"
+        except Exception:
+            return "00:00"
+
     def find_duplicates(self):
         """Find duplicate audio files"""
         directory = filedialog.askdirectory(title="Select directory to scan for duplicates")
@@ -420,6 +680,12 @@ class AudioAnalyzerGUI:
                 self.progress_var.set(value)
                 self.root.update_idletasks()
             
+            # Disable delete button until results are ready
+            try:
+                self.delete_selected_button.config(state=tk.DISABLED)
+            except Exception:
+                pass
+
             duplicates = find_duplicate_songs(directory, tolerance_sec, self.progress_var.set)
             
             # Clear the table for fresh results
@@ -435,19 +701,39 @@ class AudioAnalyzerGUI:
                     
                     for j, file_path in enumerate(group):
                         filename = os.path.basename(file_path)
-                        
-                        # For duplicate files, we'll only show basic info
+
+                        # Extract metadata for duplicate display
+                        meta = self._get_file_metadata(file_path)
+
                         self.tree.insert(
                             "", 
                             tk.END, 
-                            values=(file_path, filename, "", "", "", "", "", ""),
+                            values=(
+                                file_path,
+                                meta.get('title') or filename,
+                                meta.get('artists') or "",
+                                meta.get('bitrate') or "",
+                                meta.get('length') or "",
+                                meta.get('size_mb') or "",
+                                meta.get('bpm') or "",
+                                meta.get('year') or ""
+                            ),
                             tags=(tag_name,)
                         )
                 
                 self.status_var.set(f"Found {len(duplicates)} groups of duplicate files.")
+                # Enable delete button now that results are shown
+                try:
+                    self.delete_selected_button.config(state=tk.NORMAL)
+                except Exception:
+                    pass
             else:
                 self.status_var.set("No duplicate files found.")
                 messagebox.showinfo("Results", "No duplicate files found.")
+                try:
+                    self.delete_selected_button.config(state=tk.DISABLED)
+                except Exception:
+                    pass
             
             # Update progress bar to complete
             self.progress_var.set(100)
@@ -455,6 +741,114 @@ class AudioAnalyzerGUI:
         except Exception as e:
             self.status_var.set(f"Error: {str(e)}")
             messagebox.showerror("Error", f"An error occurred during duplicate search: {str(e)}")
+
+    def delete_selected_files(self):
+        """Delete files selected in the treeview (with confirmation)."""
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showinfo("Info", "No files selected for deletion.")
+            return
+
+        # Gather file paths and show confirmation
+        file_paths = [self.tree.set(item, "filepath") for item in selected]
+        # Limit preview text length for confirmation
+        preview = "\n".join(file_paths[:10])
+        more = len(file_paths) - 10
+        if more > 0:
+            preview += f"\n... and {more} more"
+
+        confirm = messagebox.askyesno(
+            "Confirm Delete",
+            f"Are you sure you want to permanently delete the following {len(file_paths)} file(s)?\n\n{preview}"
+        )
+
+        if not confirm:
+            return
+
+
+        # Try to use send2trash to move to Recycle Bin. If not available, offer to install it.
+        use_send2trash = False
+        send2trash_func = None
+        try:
+            from send2trash import send2trash
+            use_send2trash = True
+            send2trash_func = send2trash
+        except Exception:
+            # Offer to install send2trash
+            install = messagebox.askyesno(
+                "send2trash not installed",
+                "The 'send2trash' package is not installed.\n\n"
+                "To move files to the Recycle Bin (safer), install it now?\n\n"
+                "Yes: Attempt to install via pip.\nNo: Files will be permanently deleted."
+            )
+            if install:
+                try:
+                    import subprocess, sys
+                    self.status_var.set("Installing send2trash...")
+                    self.root.update_idletasks()
+                    subprocess.run([sys.executable, "-m", "pip", "install", "send2trash"], check=False)
+                    try:
+                        from send2trash import send2trash
+                        use_send2trash = True
+                        send2trash_func = send2trash
+                    except Exception:
+                        use_send2trash = False
+                        send2trash_func = None
+                except Exception:
+                    use_send2trash = False
+                    send2trash_func = None
+            else:
+                proceed = messagebox.askyesno(
+                    "Permanent Delete",
+                    "You chose not to install 'send2trash'.\nDo you want to proceed with permanent deletion?"
+                )
+                if not proceed:
+                    return
+
+        deleted = []
+        failed = []
+
+        for item, path in zip(selected, file_paths):
+            try:
+                if os.path.exists(path):
+                    try:
+                        if use_send2trash and send2trash_func:
+                            send2trash_func(path)
+                        else:
+                            os.remove(path)
+                        deleted.append(path)
+                        try:
+                            self.tree.delete(item)
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        failed.append((path, str(e)))
+                else:
+                    failed.append((path, "File not found"))
+                    try:
+                        self.tree.delete(item)
+                    except Exception:
+                        pass
+            except Exception as e:
+                failed.append((path, str(e)))
+
+        # Update UI and report results
+        if deleted:
+            messagebox.showinfo("Deleted", f"Successfully deleted {len(deleted)} file(s).")
+            self.status_var.set(f"Deleted {len(deleted)} file(s).")
+        if failed:
+            msgs = "\n".join([f"{p}: {m}" for p, m in failed[:10]])
+            if len(failed) > 10:
+                msgs += f"\n... and {len(failed)-10} more"
+            messagebox.showerror("Delete Errors", f"Failed to delete {len(failed)} file(s):\n\n{msgs}")
+            self.status_var.set(f"Delete completed with {len(failed)} failures.")
+
+        # If no more items, disable delete button
+        if not self.tree.get_children():
+            try:
+                self.delete_selected_button.config(state=tk.DISABLED)
+            except Exception:
+                pass
 
 
 
