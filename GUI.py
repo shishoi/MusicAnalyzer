@@ -146,14 +146,14 @@ class AudioAnalyzerGUI:
         self.tree.heading("year", text="Year")
         
         # Define columns width
-        self.tree.column("filepath", width=400)
+        self.tree.column("filepath", width=450)
         self.tree.column("title", width=250)
         self.tree.column("artists", width=180)
-        self.tree.column("bitrate", width=70)
-        self.tree.column("length", width=70)
-        self.tree.column("size_mb", width=80)
-        self.tree.column("BPM", width=50)
-        self.tree.column("year", width=50)
+        self.tree.column("bitrate", width=30)
+        self.tree.column("length", width=30)
+        self.tree.column("size_mb", width=30)
+        self.tree.column("BPM", width=30)
+        self.tree.column("year", width=30)
         
         # Pack treeview
         self.tree.pack(fill=tk.BOTH, expand=True)
@@ -749,8 +749,8 @@ class AudioAnalyzerGUI:
             messagebox.showinfo("Info", "No files selected for deletion.")
             return
 
-        # Gather file paths and show confirmation
-        file_paths = [self.tree.set(item, "filepath") for item in selected]
+        # Gather file paths and normalize them
+        file_paths = [os.path.normpath(self.tree.set(item, "filepath")) for item in selected]
         # Limit preview text length for confirmation
         preview = "\n".join(file_paths[:10])
         more = len(file_paths) - 10
@@ -759,7 +759,7 @@ class AudioAnalyzerGUI:
 
         confirm = messagebox.askyesno(
             "Confirm Delete",
-            f"Are you sure you want to permanently delete the following {len(file_paths)} file(s)?\n\n{preview}"
+            f"Are you sure you want to delete the following {len(file_paths)} file(s)?\n\n{preview}"
         )
 
         if not confirm:
@@ -810,7 +810,9 @@ class AudioAnalyzerGUI:
 
         for item, path in zip(selected, file_paths):
             try:
-                if os.path.exists(path):
+                # Normalize and verify path exists
+                path = os.path.normpath(path)
+                if os.path.exists(path) and os.path.isfile(path):
                     try:
                         if use_send2trash and send2trash_func:
                             send2trash_func(path)
@@ -824,7 +826,7 @@ class AudioAnalyzerGUI:
                     except Exception as e:
                         failed.append((path, str(e)))
                 else:
-                    failed.append((path, "File not found"))
+                    failed.append((path, "File not found or is not a file"))
                     try:
                         self.tree.delete(item)
                     except Exception:
