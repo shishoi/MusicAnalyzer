@@ -69,7 +69,7 @@ class AudioAnalyzerGUI:
         # Add buttons
         self.analyze_button = ttk.Button(
             self.button_frame, 
-            text="Analyze Files", 
+            text="🔍 Analyze Files", 
             command=self.analyze_files,
             width=20
         )
@@ -77,7 +77,7 @@ class AudioAnalyzerGUI:
         
         self.save_button = ttk.Button(
             self.button_frame, 
-            text="Save Changes", 
+            text="💾 Save Changes", 
             command=self.save_changes,
             width=20,
             state=tk.DISABLED  # Initially disabled
@@ -90,7 +90,7 @@ class AudioAnalyzerGUI:
         
         self.find_duplicates_button = ttk.Button(
             self.button_frame, 
-            text="Find Duplicate Files", 
+            text="🔎 Find Duplicate Files", 
             command=self.find_duplicates,
             width=20
         )
@@ -99,7 +99,7 @@ class AudioAnalyzerGUI:
         # Button to delete selected files (enabled when duplicate results shown)
         self.delete_selected_button = ttk.Button(
             self.button_frame,
-            text="Delete Selected",
+            text="🗑️ Delete Selected",
             command=self.delete_selected_files,
             width=20,
             state=tk.DISABLED
@@ -645,10 +645,13 @@ class AudioAnalyzerGUI:
 
         self.play_button = ttk.Button(self.playback_frame, text="Play", command=self.play_selected_file)
         self.play_button.pack(side=tk.LEFT, padx=2)
+        self.play_button.config(text="▶️ Play")
         self.pause_button = ttk.Button(self.playback_frame, text="Pause", command=self.pause_playback)
         self.pause_button.pack(side=tk.LEFT, padx=2)
+        self.pause_button.config(text="⏸️ Pause")
         self.stop_button = ttk.Button(self.playback_frame, text="Stop", command=self.stop_playback)
         self.stop_button.pack(side=tk.LEFT, padx=2)
+        self.stop_button.config(text="⏹️ Stop")
 
         self.pos_scale = ttk.Scale(self.playback_frame, from_=0, to=100, orient=tk.HORIZONTAL, variable=self.play_pos_var, command=self._on_seek)
         self.pos_scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6)
