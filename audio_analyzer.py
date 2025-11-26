@@ -707,7 +707,84 @@ def find_duplicate_songs(directory, tolerance_sec=3.0, progress_callback=None):
     # Final progress update
     if progress_callback:
         progress_callback(100)
-    
+
+    # Prioritize groups that have high filename/title similarity and consistent size/length
+    try:
+        # Build metadata map for quick lookup
+        metadata_map = {m['path']: m for m in file_metadata}
+
+        def score_group(group):
+            # group: list of file paths
+            n = len(group)
+            if n <= 1:
+                return 0.0
+
+            # Pairwise filename similarity average
+            sim_sum = 0.0
+            pairs = 0
+            for i in range(n):
+                for j in range(i+1, n):
+                    name1 = os.path.basename(group[i])
+                    name2 = os.path.basename(group[j])
+                    sim_sum += filename_similarity(name1, name2)
+                    pairs += 1
+            fname_sim = (sim_sum / pairs) if pairs else 0.0
+
+            # Size consistency (average min/max ratio)
+            sizes = []
+            durations = []
+            titles = []
+            for p in group:
+                m = metadata_map.get(p)
+                if m:
+                    sizes.append(m.get('size') or 0)
+                    if m.get('duration'):
+                        durations.append(m.get('duration'))
+                    if m.get('title'):
+                        titles.append(m.get('title'))
+
+            size_sim = 0.0
+            if len(sizes) >= 2:
+                ratios = []
+                for i in range(len(sizes)):
+                    for j in range(i+1, len(sizes)):
+                        a, b = sizes[i], sizes[j]
+                        if max(a, b) > 0:
+                            ratios.append(min(a, b) / max(a, b))
+                if ratios:
+                    size_sim = sum(ratios) / len(ratios)
+
+            # Duration consistency: small range -> high score
+            dur_sim = 0.0
+            if durations:
+                dur_range = max(durations) - min(durations)
+                # if within tolerance_sec -> high, else reduce (clamp)
+                dur_sim = max(0.0, 1.0 - (dur_range / max(tolerance_sec, 1e-6)))
+                if dur_sim > 1.0:
+                    dur_sim = 1.0
+
+            # Title match factor: proportion of matching titles
+            title_factor = 0.0
+            if titles:
+                # count most common title matches
+                from collections import Counter
+                c = Counter([t.lower() for t in titles if t])
+                if c:
+                    most_common_count = c.most_common(1)[0][1]
+                    title_factor = most_common_count / len(titles)
+
+            # Weighted score: filename (0.5), size (0.2), duration (0.2), title (0.1)
+            score = (0.5 * fname_sim) + (0.2 * size_sim) + (0.2 * dur_sim) + (0.1 * title_factor)
+            return score
+
+        # Compute scores and sort groups descending
+        scored = [(score_group(g), g) for g in duplicates]
+        scored.sort(key=lambda x: x[0], reverse=True)
+        duplicates = [g for s, g in scored]
+    except Exception:
+        # If anything goes wrong, fall back to original order
+        pass
+
     print(f"Found {len(duplicates)} groups of duplicate files")
     
     return duplicates
