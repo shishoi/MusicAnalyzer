@@ -90,7 +90,7 @@ class AudioAnalyzerGUI:
         
         self.find_duplicates_button = ttk.Button(
             self.button_frame, 
-            text="🔎 Find Duplicate Files", 
+            text="🗐 Find Duplicate Files", 
             command=self.find_duplicates,
             width=20
         )
