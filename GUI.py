@@ -5,7 +5,7 @@ from tkinter import ttk, filedialog, messagebox
 import threading
 
 # Import required modules
-from audio_analyzer import AudioAnalyzer, TraktorNMLEditor, find_duplicate_songs
+from audio_analyzer import AudioAnalyzer, TraktorNMLEditor, find_duplicate_songs, load_collection_path, save_collection_path, parse_traktor_collection
 
 # Optional: VLC-based playback support (python-vlc)
 try:
@@ -95,6 +95,14 @@ class AudioAnalyzerGUI:
             width=20
         )
         self.find_duplicates_button.pack(side=tk.LEFT, padx=5)
+
+        self.collection_button = ttk.Button(
+            self.button_frame,
+            text="🎵 Analyze Collection",
+            command=self.analyze_collection,
+            width=20
+        )
+        self.collection_button.pack(side=tk.LEFT, padx=5)
 
         # Button to delete selected files (enabled when duplicate results shown)
         self.delete_selected_button = ttk.Button(
@@ -248,6 +256,49 @@ class AudioAnalyzerGUI:
         self.tree.column("size_mb", width=30)
         self.tree.column("BPM", width=30)
         self.tree.column("year", width=30)
+    
+    def _setup_collection_columns(self):
+        """Set up columns for Collection Analysis mode."""
+        # Remove existing columns
+        for col in self.tree["columns"]:
+            self.tree.column(col, width=0, stretch=tk.NO)
+        
+        # Collection columns
+        self.collection_columns = ("filepath", "title", "artist", "album", "genre", "comment", "bpm", "bitrate", "length", "key")
+        
+        # Reconfigure with collection columns
+        self.tree.configure(columns=self.collection_columns)
+        
+        # Define headings
+        self.tree.heading("filepath", text="File Path")
+        self.tree.heading("title", text="Title")
+        self.tree.heading("artist", text="Artist")
+        self.tree.heading("album", text="Album")
+        self.tree.heading("genre", text="Genre")
+        self.tree.heading("comment", text="Comment")
+        self.tree.heading("bpm", text="BPM")
+        self.tree.heading("bitrate", text="Bitrate")
+        self.tree.heading("length", text="Length")
+        self.tree.heading("key", text="Key")
+        
+        # Define columns width
+        self.tree.column("filepath", width=300)
+        self.tree.column("title", width=200)
+        self.tree.column("artist", width=150)
+        self.tree.column("album", width=150)
+        self.tree.column("genre", width=100)
+        self.tree.column("comment", width=150)
+        self.tree.column("bpm", width=60)
+        self.tree.column("bitrate", width=60)
+        self.tree.column("length", width=60)
+        self.tree.column("key", width=60)
+        
+        # Bind column header clicks for sorting
+        self.tree.bind("<Button-1>", self._on_collection_column_click)
+        
+        # Store sort state
+        self.sort_column = None
+        self.sort_reverse = False
     
     
     def on_cell_double_click(self, event):
@@ -965,6 +1016,135 @@ class AudioAnalyzerGUI:
             except Exception:
                 pass
 
+    def analyze_collection(self):
+        """Load and display Traktor collection."""
+        # First, try to load saved collection path
+        collection_path = load_collection_path()
+        
+        if collection_path and os.path.exists(collection_path):
+            # Ask if user wants to use saved path or browse for new one
+            use_saved = messagebox.askyesno(
+                "Collection Path",
+                f"Use previously saved collection path?\n\n{collection_path}"
+            )
+            if not use_saved:
+                collection_path = filedialog.askdirectory(title="Select Traktor Collection folder")
+        else:
+            # Prompt user to select collection folder
+            collection_path = filedialog.askdirectory(title="Select Traktor Collection folder")
+        
+        if not collection_path:
+            return
+        
+        # Save the collection path
+        save_collection_path(collection_path)
+        
+        # Start collection parsing in a separate thread
+        threading.Thread(target=self._analyze_collection_thread, args=(collection_path,), daemon=True).start()
+    
+    def _analyze_collection_thread(self, collection_path):
+        """Thread function to parse collection without blocking the GUI"""
+        try:
+            self.status_var.set(f"Loading Traktor collection from: {collection_path}")
+            self.progress_var.set(0)
+            
+            # Switch to collection mode columns
+            self.current_mode = 'collection'
+            self._setup_collection_columns()
+            
+            # Clear the table
+            for item in self.tree.get_children():
+                self.tree.delete(item)
+            
+            self.status_var.set("Parsing collection.nml...")
+            
+            # Parse collection
+            tracks = parse_traktor_collection(collection_path)
+            
+            if not tracks:
+                self.status_var.set("No tracks found in collection or error parsing collection.nml")
+                messagebox.showwarning("No Tracks", "Could not parse collection or no tracks found.")
+                return
+            
+            # Display tracks in treeview
+            for i, track in enumerate(tracks):
+                self.tree.insert(
+                    "",
+                    tk.END,
+                    values=(
+                        track.get('filepath', ''),
+                        track.get('title', ''),
+                        track.get('artist', ''),
+                        track.get('album', ''),
+                        track.get('genre', ''),
+                        track.get('comment', ''),
+                        track.get('tempo_bpm', track.get('bpm', '')),
+                        track.get('bitrate', ''),
+                        track.get('length', ''),
+                        track.get('key', '')
+                    )
+                )
+                # Update progress
+                self.progress_var.set((i / len(tracks)) * 100)
+                self.root.update_idletasks()
+            
+            self.status_var.set(f"Loaded {len(tracks)} tracks from Traktor collection.")
+            self.progress_var.set(100)
+            
+        except Exception as e:
+            self.status_var.set(f"Error: {str(e)}")
+            messagebox.showerror("Error", f"Error loading collection: {str(e)}")
+    
+    def _on_collection_column_click(self, event):
+        """Handle column header clicks for sorting in collection mode."""
+        if self.current_mode != 'collection':
+            return
+        
+        # Get the column that was clicked
+        region = self.tree.identify_region(event.x, event.y)
+        if region != "heading":
+            return
+        
+        col = self.tree.identify_column(event.x)
+        col_index = int(col[1:]) - 1
+        
+        if col_index < 0 or col_index >= len(self.collection_columns):
+            return
+        
+        column = self.collection_columns[col_index]
+        
+        # Determine sort direction
+        if self.sort_column == column:
+            self.sort_reverse = not self.sort_reverse
+        else:
+            self.sort_column = column
+            self.sort_reverse = False
+        
+        # Get all items
+        items = self.tree.get_children()
+        values_list = []
+        
+        for item in items:
+            values = self.tree.item(item, 'values')
+            values_list.append((item, values))
+        
+        # Sort based on the column
+        try:
+            # Try to sort numerically first
+            values_list.sort(
+                key=lambda x: float(x[1][col_index]) if x[1][col_index] else 0,
+                reverse=self.sort_reverse
+            )
+        except (ValueError, IndexError):
+            # Fall back to string sorting
+            values_list.sort(
+                key=lambda x: str(x[1][col_index]) if col_index < len(x[1]) else "",
+                reverse=self.sort_reverse
+            )
+        
+        # Reorder items in treeview
+        for idx, (item, _) in enumerate(values_list):
+            self.tree.move(item, '', idx)
 
 
 

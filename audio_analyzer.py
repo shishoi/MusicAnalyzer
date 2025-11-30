@@ -6,6 +6,7 @@ from pydub import AudioSegment
 from datetime import datetime
 import shutil
 import xml.etree.ElementTree as ET
+import json
 
 """ 
 Audio and music analysis - BPM, Key, CUE points
@@ -835,3 +836,99 @@ def analyze_audio_file(file_path):
     key = analyzer.analyze_key()
     
     # Detect CU
+
+
+# Collection management
+
+CONFIG_FILE = os.path.join(os.path.dirname(__file__), ".collection_config.json")
+
+def save_collection_path(path):
+    """Save collection folder path to config file."""
+    try:
+        config = {"collection_path": path}
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(config, f)
+        return True
+    except Exception as e:
+        print(f"Error saving collection path: {e}")
+        return False
+
+def load_collection_path():
+    """Load collection folder path from config file."""
+    try:
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, 'r') as f:
+                config = json.load(f)
+                return config.get("collection_path")
+    except Exception as e:
+        print(f"Error loading collection path: {e}")
+    return None
+
+def parse_traktor_collection(collection_path):
+    """
+    Parse Traktor collection.nml file and extract track metadata.
+    
+    Args:
+        collection_path (str): Path to the collection folder
+    
+    Returns:
+        list: List of dicts with track metadata (title, BPM, genre, comment, artist, etc.)
+    """
+    nml_path = os.path.join(collection_path, "collection.nml")
+    
+    if not os.path.exists(nml_path):
+        print(f"collection.nml not found at: {nml_path}")
+        return []
+    
+    tracks = []
+    try:
+        tree = ET.parse(nml_path)
+        root = tree.getroot()
+        
+        # Extract all ENTRY elements (tracks)
+        for entry in root.findall(".//ENTRY"):
+            track = {}
+            
+            # Extract basic attributes
+            track['title'] = entry.get('TITLE', '')
+            track['artist'] = entry.get('ARTIST', '')
+            track['album'] = entry.get('ALBUM', '')
+            track['genre'] = entry.get('GENRE', '')
+            track['comment'] = entry.get('COMMENT', '')
+            track['filepath'] = entry.get('LOCATION', '')
+            
+            # Extract INFO subelement
+            info = entry.find('INFO')
+            if info is not None:
+                track['bpm'] = info.get('BPM', '')
+                track['bitrate'] = info.get('BITRATE', '')
+                track['length'] = info.get('DURATION', '')
+            
+            # Extract TEMPO subelement (Traktor BPM)
+            tempo = entry.find('TEMPO')
+            if tempo is not None:
+                track['tempo_bpm'] = tempo.get('BPM', '')
+            
+            # Extract KEY subelement
+            key = entry.find('KEY')
+            if key is not None:
+                track['key'] = key.get('VALUE', '')
+            
+            # Extract CUEPOINT data
+            cuepoints = entry.findall('.//CUE_POINT')
+            cue_dict = {}
+            for cue in cuepoints:
+                cue_name = cue.get('NAME', '').upper()
+                cue_pos = cue.get('START', '')
+                if cue_name and cue_pos:
+                    cue_dict[cue_name] = cue_pos
+            if cue_dict:
+                track['cuepoints'] = cue_dict
+            
+            tracks.append(track)
+    
+    except Exception as e:
+        print(f"Error parsing collection.nml: {e}")
+        return []
+    
+    return tracks
