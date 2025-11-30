@@ -263,8 +263,12 @@ class AudioAnalyzerGUI:
         for col in self.tree["columns"]:
             self.tree.column(col, width=0, stretch=tk.NO)
         
-        # Collection columns
-        self.collection_columns = ("filepath", "title", "artist", "album", "genre", "comment", "bpm", "bitrate", "length", "key")
+        # Comprehensive collection columns
+        self.collection_columns = (
+            "filepath", "title", "artist", "remixer", "producer", "album", "genre",
+            "label", "catalogno", "release_date", "track_number", "bpm", "key", "key_text",
+            "bitrate", "length", "autogain", "rating", "mix", "comment", "lyrics", "cover"
+        )
         
         # Reconfigure with collection columns
         self.tree.configure(columns=self.collection_columns)
@@ -273,25 +277,49 @@ class AudioAnalyzerGUI:
         self.tree.heading("filepath", text="File Path")
         self.tree.heading("title", text="Title")
         self.tree.heading("artist", text="Artist")
+        self.tree.heading("remixer", text="Remixer")
+        self.tree.heading("producer", text="Producer")
         self.tree.heading("album", text="Album")
         self.tree.heading("genre", text="Genre")
-        self.tree.heading("comment", text="Comment")
+        self.tree.heading("label", text="Label")
+        self.tree.heading("catalogno", text="Cat. No.")
+        self.tree.heading("release_date", text="Release Date")
+        self.tree.heading("track_number", text="Track No.")
         self.tree.heading("bpm", text="BPM")
+        self.tree.heading("key", text="Key")
+        self.tree.heading("key_text", text="Key Text")
         self.tree.heading("bitrate", text="Bitrate")
         self.tree.heading("length", text="Length")
-        self.tree.heading("key", text="Key")
+        self.tree.heading("autogain", text="AutoGain")
+        self.tree.heading("rating", text="Rating")
+        self.tree.heading("mix", text="Mix")
+        self.tree.heading("comment", text="Comment")
+        self.tree.heading("lyrics", text="Lyrics")
+        self.tree.heading("cover", text="Cover")
         
         # Define columns width
-        self.tree.column("filepath", width=300)
-        self.tree.column("title", width=200)
-        self.tree.column("artist", width=150)
-        self.tree.column("album", width=150)
-        self.tree.column("genre", width=100)
-        self.tree.column("comment", width=150)
-        self.tree.column("bpm", width=60)
-        self.tree.column("bitrate", width=60)
+        self.tree.column("filepath", width=250)
+        self.tree.column("title", width=180)
+        self.tree.column("artist", width=120)
+        self.tree.column("remixer", width=100)
+        self.tree.column("producer", width=100)
+        self.tree.column("album", width=120)
+        self.tree.column("genre", width=80)
+        self.tree.column("label", width=100)
+        self.tree.column("catalogno", width=80)
+        self.tree.column("release_date", width=80)
+        self.tree.column("track_number", width=60)
+        self.tree.column("bpm", width=50)
+        self.tree.column("key", width=40)
+        self.tree.column("key_text", width=60)
+        self.tree.column("bitrate", width=80)
         self.tree.column("length", width=60)
-        self.tree.column("key", width=60)
+        self.tree.column("autogain", width=70)
+        self.tree.column("rating", width=50)
+        self.tree.column("mix", width=80)
+        self.tree.column("comment", width=150)
+        self.tree.column("lyrics", width=100)
+        self.tree.column("cover", width=50)
         
         # Bind column header clicks for sorting
         self.tree.bind("<Button-1>", self._on_collection_column_click)
@@ -1075,13 +1103,25 @@ class AudioAnalyzerGUI:
                         track.get('filepath', ''),
                         track.get('title', ''),
                         track.get('artist', ''),
+                        track.get('remixer', ''),
+                        track.get('producer', ''),
                         track.get('album', ''),
                         track.get('genre', ''),
-                        track.get('comment', ''),
-                        track.get('tempo_bpm', track.get('bpm', '')),
+                        track.get('label', ''),
+                        track.get('catalogno', ''),
+                        track.get('release_date', ''),
+                        track.get('track_number', ''),
+                        track.get('bpm', ''),
+                        track.get('key', ''),
+                        track.get('key_text', ''),
                         track.get('bitrate', ''),
                         track.get('length', ''),
-                        track.get('key', '')
+                        track.get('autogain', ''),
+                        track.get('rating', ''),
+                        track.get('mix', ''),
+                        track.get('comment', ''),
+                        track.get('lyrics', ''),
+                        track.get('cover', '')
                     )
                 )
                 # Update progress

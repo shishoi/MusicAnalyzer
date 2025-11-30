@@ -864,15 +864,42 @@ def load_collection_path():
         print(f"Error loading collection path: {e}")
     return None
 
+def format_bitrate(bitrate_value):
+    """Convert bitrate from raw value to kbps format."""
+    try:
+        br = int(bitrate_value)
+        if br > 1000:
+            return f"{br // 1000} kbps"
+        return f"{br} kbps"
+    except (ValueError, TypeError):
+        return bitrate_value
+
+def format_bpm(bpm_value):
+    """Format BPM as integer (zero decimal places)."""
+    try:
+        return str(int(float(bpm_value)))
+    except (ValueError, TypeError):
+        return bpm_value if bpm_value else ""
+
+def format_duration(duration_sec):
+    """Convert duration from seconds to MM:SS format."""
+    try:
+        sec = int(duration_sec)
+        minutes = sec // 60
+        seconds = sec % 60
+        return f"{minutes:02d}:{seconds:02d}"
+    except (ValueError, TypeError):
+        return duration_sec if duration_sec else ""
+
 def parse_traktor_collection(collection_path):
     """
-    Parse Traktor collection.nml file and extract track metadata.
+    Parse Traktor collection.nml file and extract comprehensive track metadata.
     
     Args:
         collection_path (str): Path to the collection folder
     
     Returns:
-        list: List of dicts with track metadata (title, BPM, genre, comment, artist, etc.)
+        list: List of dicts with track metadata including all Traktor tags
     """
     nml_path = os.path.join(collection_path, "collection.nml")
     
@@ -889,32 +916,61 @@ def parse_traktor_collection(collection_path):
         for entry in root.findall(".//ENTRY"):
             track = {}
             
-            # Extract basic attributes
+            # Extract basic attributes from ENTRY element
+            track['filepath'] = entry.get('LOCATION', '')
             track['title'] = entry.get('TITLE', '')
             track['artist'] = entry.get('ARTIST', '')
             track['album'] = entry.get('ALBUM', '')
             track['genre'] = entry.get('GENRE', '')
             track['comment'] = entry.get('COMMENT', '')
-            track['filepath'] = entry.get('LOCATION', '')
+            track['remixer'] = entry.get('REMIXER', '')
+            track['producer'] = entry.get('PRODUCER', '')
+            track['label'] = entry.get('LABEL', '')
+            track['catalogno'] = entry.get('CATALOGNO', '')
+            track['release_date'] = entry.get('RELEASE_DATE', '')
+            track['mix'] = entry.get('MIX', '')
+            track['lyrics'] = entry.get('LYRICS', '')
+            track['track_number'] = entry.get('TRACK', '')
+            track['rating'] = entry.get('RATING', '')
             
-            # Extract INFO subelement
+            # Extract INFO subelement (duration, bitrate, etc)
             info = entry.find('INFO')
             if info is not None:
-                track['bpm'] = info.get('BPM', '')
-                track['bitrate'] = info.get('BITRATE', '')
-                track['length'] = info.get('DURATION', '')
+                track['bitrate'] = format_bitrate(info.get('BITRATE', ''))
+                track['length'] = format_duration(info.get('DURATION', ''))
+                track['autogain'] = info.get('AUTOGAIN', '')
+            else:
+                track['bitrate'] = ''
+                track['length'] = ''
+                track['autogain'] = ''
             
-            # Extract TEMPO subelement (Traktor BPM)
+            # Extract TEMPO subelement (BPM)
             tempo = entry.find('TEMPO')
             if tempo is not None:
-                track['tempo_bpm'] = tempo.get('BPM', '')
+                bpm_raw = tempo.get('BPM', '')
+                track['bpm'] = format_bpm(bpm_raw)
+            else:
+                track['bpm'] = ''
             
-            # Extract KEY subelement
+            # Extract KEY subelement (numeric key)
             key = entry.find('KEY')
             if key is not None:
                 track['key'] = key.get('VALUE', '')
+                track['key_text'] = key.get('TEXT', '')
+            else:
+                track['key'] = ''
+                track['key_text'] = ''
             
-            # Extract CUEPOINT data
+            # Extract cover art (COVER element)
+            cover = entry.find('COVER')
+            if cover is not None:
+                # COVER element has TYPE and data attributes
+                # For now, just flag that cover exists
+                track['cover'] = cover.get('TYPE', '')
+            else:
+                track['cover'] = ''
+            
+            # Extract CUEPOINT data for reference
             cuepoints = entry.findall('.//CUE_POINT')
             cue_dict = {}
             for cue in cuepoints:
