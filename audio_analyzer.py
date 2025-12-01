@@ -901,6 +901,8 @@ def parse_traktor_collection(collection_path):
     Returns:
         list: List of dicts with track metadata including all Traktor tags
     """
+    import urllib.parse
+    
     nml_path = os.path.join(collection_path, "collection.nml")
     
     if not os.path.exists(nml_path):
@@ -912,12 +914,50 @@ def parse_traktor_collection(collection_path):
         tree = ET.parse(nml_path)
         root = tree.getroot()
         
+        # Debug: print root tag
+        print(f"Root tag: {root.tag}")
+        
         # Extract all ENTRY elements (tracks)
-        for entry in root.findall(".//ENTRY"):
+        entries = root.findall(".//ENTRY")
+        print(f"Found {len(entries)} entries in collection.nml")
+        
+        for idx, entry in enumerate(entries):
             track = {}
-            
+
             # Extract basic attributes from ENTRY element
-            track['filepath'] = entry.get('LOCATION', '')
+            # Traktor can store location in 'LOCATION' attribute, or split into 'DIR' + 'FILE', or use file:// URLs
+            location = entry.get('LOCATION', '') or ''
+            if not location:
+                # Try DIR and FILE attributes
+                dir_attr = entry.get('DIR', '') or entry.get('DIRECTORY', '')
+                file_attr = entry.get('FILE', '') or entry.get('FILENAME', '')
+                if dir_attr or file_attr:
+                    try:
+                        location = os.path.join(dir_attr, file_attr)
+                    except Exception:
+                        location = dir_attr + file_attr
+
+            # If location is a file:// URL, parse it
+            if location.startswith('file://'):
+                try:
+                    parsed = urllib.parse.urlparse(location)
+                    path = urllib.parse.unquote(parsed.path)
+                    # On Windows, urlparse path may start with /C:/
+                    if path.startswith('/') and len(path) > 2 and path[2] == ':':
+                        path = path[1:]
+                    location = path
+                except Exception:
+                    pass
+
+            # Decode percent-encoding if present
+            if '%' in location:
+                try:
+                    location = urllib.parse.unquote(location)
+                except Exception:
+                    pass
+
+            track['filepath'] = location
+
             track['title'] = entry.get('TITLE', '')
             track['artist'] = entry.get('ARTIST', '')
             track['album'] = entry.get('ALBUM', '')
@@ -932,6 +972,11 @@ def parse_traktor_collection(collection_path):
             track['lyrics'] = entry.get('LYRICS', '')
             track['track_number'] = entry.get('TRACK', '')
             track['rating'] = entry.get('RATING', '')
+
+            # Debug first few entries
+            if idx < 3:
+                print(f"Entry {idx}: title='{track['title']}', artist='{track['artist']}', filepath='{track['filepath'][:50] if track['filepath'] else ''}...'")
+            
             
             # Extract INFO subelement (duration, bitrate, etc)
             info = entry.find('INFO')

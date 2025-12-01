@@ -886,10 +886,31 @@ class AudioAnalyzerGUI:
             
             # Display only duplicate results
             if duplicates:
+                # Darker color palette (avoid blues that clash with selected row)
+                colors = [
+                    "#FFB3B3",  # soft rose
+                    "#FFCC99",  # warm apricot
+                    "#B3E6B3",  # muted green
+                    "#D6C9A9",  # warm khaki
+                    "#FFAD80",  # deeper peach
+                    "#FFB6D9",  # dusty pink
+                    "#C8EDE0",  # soft teal
+                    "#FFD98E",  # golden
+                    "#FFE6CC",  # light caramel
+                    "#FFCCA6",  # muted coral
+                    "#EBA6C5",  # rose
+                    "#C9A6E6",  # lavender (not blue)
+                    "#FFEA66",  # warm yellow
+                    "#80C9B3",  # darker mint
+                    "#EFA6C5",  # pale rose
+                ]
+
                 for i, group in enumerate(duplicates):
                     # Use a tag to color each group differently
                     tag_name = f"group{i}"
-                    self.tree.tag_configure(tag_name, background=f"#{'%02x' % ((i*30) % 256)}{'%02x' % ((i*50) % 256)}ff")
+                    color = colors[i % len(colors)]
+                    # Use slightly darker text color when background is light
+                    self.tree.tag_configure(tag_name, background=color)
                     
                     for j, file_path in enumerate(group):
                         filename = os.path.basename(file_path)
