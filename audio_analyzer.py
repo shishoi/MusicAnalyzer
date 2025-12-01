@@ -1008,12 +1008,46 @@ def parse_traktor_collection(collection_path):
             
             # Extract cover art (COVER element)
             cover = entry.find('COVER')
+            cover_path = ''
             if cover is not None:
-                # COVER element has TYPE and data attributes
-                # For now, just flag that cover exists
-                track['cover'] = cover.get('TYPE', '')
-            else:
-                track['cover'] = ''
+                # COVER element may include base64 DATA or a PATH attribute
+                data = cover.get('DATA') or cover.get('IMAGE') or None
+                path_attr = cover.get('PATH') or cover.get('FILE') or None
+                if data:
+                    # Try to decode base64 data and write to temp file
+                    try:
+                        import base64, tempfile, re
+                        # Data may contain the mime prefix like data:image/png;base64,xxx
+                        m = re.match(r"data:(.*?);base64,(.*)", data)
+                        if m:
+                            b64 = m.group(2)
+                            ext = 'png' if 'png' in m.group(1) else 'jpg'
+                        else:
+                            b64 = data
+                            ext = 'jpg'
+                        decoded = base64.b64decode(b64)
+                        tmp = tempfile.gettempdir()
+                        safe_title = re.sub(r"[^0-9a-zA-Z_-]", "_", track.get('title','')[:40]) or f"cover_{idx}"
+                        out_path = os.path.join(tmp, f"{safe_title}.{ext}")
+                        with open(out_path, 'wb') as imgf:
+                            imgf.write(decoded)
+                        cover_path = out_path
+                    except Exception:
+                        cover_path = ''
+                elif path_attr:
+                    # If path is provided, try to decode percent-encoding
+                    try:
+                        import urllib.parse
+                        p = urllib.parse.unquote(path_attr)
+                        # If path is relative, join with collection_path
+                        if not os.path.isabs(p):
+                            p = os.path.join(collection_path, p)
+                        cover_path = p
+                    except Exception:
+                        cover_path = path_attr
+                else:
+                    cover_path = ''
+            track['cover_path'] = cover_path
             
             # Extract CUEPOINT data for reference
             cuepoints = entry.findall('.//CUE_POINT')

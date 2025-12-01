@@ -156,6 +156,10 @@ class AudioAnalyzerGUI:
             self.vlc_instance = None
             self.vlc_player = None
 
+        # Store parsed collection tracks and cover image refs
+        self.collection_tracks = {}
+        self._cover_images = {}
+
     def create_treeview(self):
         # Scrollbar
         scrollbar_y = ttk.Scrollbar(self.table_frame, orient="vertical")
@@ -341,9 +345,22 @@ class AudioAnalyzerGUI:
         # Get column name
         column_index = int(column[1:]) - 1
         column_name = self.tree["columns"][column_index]
-        
-        # Don't allow editing filepath
+        # If filepath column clicked, open in Explorer
         if column_name == "filepath":
+            path = self.tree.set(item, "filepath")
+            if path:
+                self._open_in_explorer(path)
+            return
+
+        # If cover column clicked, show cover popup if available
+        if column_name == "cover":
+            filepath = self.tree.set(item, "filepath")
+            track = self.collection_tracks.get(filepath, {})
+            cover_path = track.get('cover_path') if track else None
+            if cover_path:
+                self._show_cover_popup(cover_path)
+            else:
+                messagebox.showinfo("Cover Art", "No cover art available for this track.")
             return
         
         # Get current value
@@ -1117,11 +1134,20 @@ class AudioAnalyzerGUI:
             
             # Display tracks in treeview
             for i, track in enumerate(tracks):
+                filepath = track.get('filepath', '')
+                # Store track metadata for later use (cover popup, etc.)
+                try:
+                    self.collection_tracks[filepath] = track
+                except Exception:
+                    pass
+
+                cover_indicator = '🖼️' if track.get('cover_path') else ''
+
                 self.tree.insert(
                     "",
                     tk.END,
                     values=(
-                        track.get('filepath', ''),
+                        filepath,
                         track.get('title', ''),
                         track.get('artist', ''),
                         track.get('remixer', ''),
@@ -1142,7 +1168,7 @@ class AudioAnalyzerGUI:
                         track.get('mix', ''),
                         track.get('comment', ''),
                         track.get('lyrics', ''),
-                        track.get('cover', '')
+                        cover_indicator
                     )
                 )
                 # Update progress
@@ -1206,6 +1232,56 @@ class AudioAnalyzerGUI:
         # Reorder items in treeview
         for idx, (item, _) in enumerate(values_list):
             self.tree.move(item, '', idx)
+
+    def _open_in_explorer(self, path):
+        """Open the given file path in the system file explorer."""
+        try:
+            if os.path.isdir(path):
+                os.startfile(path)
+            else:
+                # Open containing folder and select file
+                if os.path.exists(path):
+                    # Windows-specific: use explorer /select,
+                    subprocess_cmd = f'explorer /select,"{path}"'
+                    try:
+                        os.system(subprocess_cmd)
+                    except Exception:
+                        os.startfile(os.path.dirname(path))
+                else:
+                    messagebox.showerror("File Not Found", f"Path not found: {path}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not open file explorer: {e}")
+
+    def _show_cover_popup(self, cover_path):
+        """Show cover art in a popup window. Uses PIL if available."""
+        try:
+            from PIL import Image, ImageTk
+            pil_available = True
+        except Exception:
+            pil_available = False
+
+        if not cover_path or not os.path.exists(cover_path):
+            messagebox.showinfo("Cover Art", "Cover image not found.")
+            return
+
+        popup = tk.Toplevel(self.root)
+        popup.title("Cover Art")
+
+        try:
+            if pil_available:
+                img = Image.open(cover_path)
+                img.thumbnail((600, 600))
+                photo = ImageTk.PhotoImage(img)
+            else:
+                # Fallback to Tk PhotoImage (supports PNG/GIF)
+                photo = tk.PhotoImage(file=cover_path)
+
+            label = tk.Label(popup, image=photo)
+            label.image = photo  # keep ref
+            label.pack()
+        except Exception as e:
+            popup.destroy()
+            messagebox.showerror("Image Error", f"Could not open cover image: {e}")
 
 
 
