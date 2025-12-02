@@ -1338,28 +1338,73 @@ class AudioAnalyzerGUI:
     def _open_in_explorer(self, path):
         """Open the given file path in the system file explorer."""
         try:
+            # Strip whitespace
+            path = str(path).strip() if path else ""
+            
+            if not path:
+                messagebox.showerror("Error", "Path is empty or invalid")
+                return
+            
+            # Handle file:// URLs
+            if path.startswith("file://"):
+                try:
+                    from urllib.parse import unquote
+                    parsed = path[7:]  # remove 'file://'
+                    # Handle Windows paths that may have leading /
+                    if parsed.startswith('/') and len(parsed) > 2 and parsed[2] == ':':
+                        parsed = parsed[1:]
+                    path = unquote(parsed)
+                except Exception as e:
+                    print(f"Error parsing file:// URL: {e}")
+                    return
+            
+            # Decode URL encoding
+            if '%' in path:
+                try:
+                    from urllib.parse import unquote
+                    path = unquote(path)
+                except Exception:
+                    pass
+            
             # Normalize path
             path = os.path.normpath(path)
+            
+            # Debug: print what we're trying to open
+            print(f"DEBUG _open_in_explorer: normalized path = '{path}'")
+            print(f"DEBUG: exists = {os.path.exists(path)}, isdir = {os.path.isdir(path) if os.path.exists(path) else 'N/A'}")
+            
+            # If it's a directory, just open it
             if os.path.isdir(path):
                 try:
                     os.startfile(path)
                     return
-                except Exception:
+                except Exception as e:
+                    print(f"Error opening directory: {e}")
                     pass
-
-            # Open containing folder and select file
-            if os.path.exists(path):
+            
+            # If it's a file, open folder and select file
+            if os.path.exists(path) and os.path.isfile(path):
+                folder = os.path.dirname(path)
+                filename = os.path.basename(path)
+                print(f"DEBUG: opening folder='{folder}', selecting file='{filename}'")
                 try:
-                    # explorer accepts '/select,fullpath'
-                    subprocess.Popen(["explorer", f"/select,{path}"])
-                except Exception:
+                    # Use explorer /select to highlight the file
+                    subprocess.Popen(f'explorer /select,"{path}"', shell=True)
+                    return
+                except Exception as e:
+                    print(f"Error with /select approach: {e}")
                     try:
-                        subprocess.Popen(["explorer", os.path.dirname(path)])
-                    except Exception:
-                        messagebox.showerror("Error", f"Could not open Explorer for: {path}")
-            else:
-                messagebox.showerror("File Not Found", f"Path not found: {path}")
+                        # Fallback: just open the folder
+                        subprocess.Popen(f'explorer "{folder}"', shell=True)
+                        return
+                    except Exception as e2:
+                        print(f"Error opening folder fallback: {e2}")
+            
+            # Path doesn't exist
+            print(f"DEBUG: path does not exist: {path}")
+            messagebox.showerror("File Not Found", f"File or folder not found:\n{path}")
         except Exception as e:
+            print(f"DEBUG _open_in_explorer exception: {e}")
             messagebox.showerror("Error", f"Could not open file explorer: {e}")
 
     def _on_tree_right_click(self, event):
