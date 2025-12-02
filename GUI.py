@@ -3,6 +3,7 @@ import sys
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import threading
+import subprocess
 
 # Import required modules
 from audio_analyzer import AudioAnalyzer, TraktorNMLEditor, find_duplicate_songs, load_collection_path, save_collection_path, parse_traktor_collection
@@ -136,11 +137,25 @@ class AudioAnalyzerGUI:
         # Create treeview (table)
         self.create_treeview()
         
-        # Status bar
+        # Bottom area: feedback (left) and status bar (right)
+        self.bottom_frame = ttk.Frame(root)
+        self.bottom_frame.pack(side=tk.BOTTOM, fill=tk.X)
+
+        self.feedback_var = tk.StringVar()
+        self.feedback_var.set("")
+        self.feedback_label = ttk.Label(self.bottom_frame, textvariable=self.feedback_var, anchor=tk.W)
+        self.feedback_label.pack(side=tk.LEFT, fill=tk.X, padx=6)
+
+        # Status bar (right)
         self.status_var = tk.StringVar()
         self.status_var.set("Ready")
-        self.status_bar = ttk.Label(root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
-        self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        self.status_bar = ttk.Label(self.bottom_frame, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
+        self.status_bar.pack(side=tk.RIGHT, fill=tk.X)
+
+        # Feedback animation handle
+        self._feedback_after_id = None
+        self._feedback_base = ""
+        self._feedback_dots = 0
 
         # VLC player setup
         self.vlc_available = _vlc_available
@@ -437,6 +452,11 @@ class AudioAnalyzerGUI:
     def _analyze_files_thread(self, file_paths):
         """Thread function to analyze files without blocking the GUI"""
         try:
+            # Start animated feedback and status
+            try:
+                self.start_feedback("Analyzing files")
+            except Exception:
+                pass
             self.status_var.set("Analyzing files...")
             self.progress_var.set(0)
             
@@ -509,12 +529,20 @@ class AudioAnalyzerGUI:
             # Complete the progress bar
             self.progress_var.set(100)
             self.status_var.set(f"Analysis complete. Analyzed {len(file_paths)} files.")
-            
+            try:
+                self.stop_feedback("Complete")
+            except Exception:
+                pass
+
             # Enable save button
             self.save_button.config(state=tk.NORMAL)
             
         except Exception as e:
             self.status_var.set(f"Error: {str(e)}")
+            try:
+                self.stop_feedback("Error")
+            except Exception:
+                pass
             messagebox.showerror("Error", f"An error occurred during analysis: {str(e)}")
     
     def save_changes(self):
@@ -771,6 +799,46 @@ class AudioAnalyzerGUI:
             self.pause_button.config(state=tk.DISABLED)
             self.stop_button.config(state=tk.DISABLED)
 
+    # --- Feedback animation helpers ---
+    def _feedback_tick(self):
+        """Internal: update animated dots"""
+        self._feedback_dots = (self._feedback_dots + 1) % 4
+        dots = '.' * self._feedback_dots
+        self.feedback_var.set(self._feedback_base + dots)
+        self._feedback_after_id = self.root.after(500, self._feedback_tick)
+
+    def start_feedback(self, text):
+        """Start animated feedback with base text (e.g. 'Analyzing')."""
+        # Stop existing animation
+        try:
+            if self._feedback_after_id:
+                self.root.after_cancel(self._feedback_after_id)
+        except Exception:
+            pass
+        self._feedback_base = text
+        self._feedback_dots = 0
+        self.feedback_var.set(text)
+        self._feedback_after_id = self.root.after(500, self._feedback_tick)
+
+    def stop_feedback(self, final_text=None, timeout_clear=3000):
+        """Stop animation and show final_text (or 'Complete'). Clears after timeout_clear ms if provided."""
+        try:
+            if self._feedback_after_id:
+                self.root.after_cancel(self._feedback_after_id)
+        except Exception:
+            pass
+        self._feedback_after_id = None
+        msg = final_text or "Complete"
+        self.feedback_var.set(msg)
+        # Optionally clear after a few seconds
+        if timeout_clear:
+            def _clear():
+                try:
+                    self.feedback_var.set("")
+                except Exception:
+                    pass
+            self.root.after(timeout_clear, _clear)
+
     def play_selected_file(self):
         """Play the currently selected file in the treeview."""
         sel = self.tree.selection()
@@ -880,6 +948,10 @@ class AudioAnalyzerGUI:
         """Thread function to find duplicates without blocking the GUI"""
         try:
             from audio_analyzer import find_duplicate_songs
+            try:
+                self.start_feedback("Searching duplicates")
+            except Exception:
+                pass
             self.status_var.set(f"Scanning directory for duplicates: {directory}")
             self.progress_var.set(0)
             
@@ -962,6 +1034,10 @@ class AudioAnalyzerGUI:
                         )
                 
                 self.status_var.set(f"Found {len(duplicates)} groups of duplicate files.")
+                try:
+                    self.stop_feedback(f"Found {len(duplicates)} groups")
+                except Exception:
+                    pass
                 # Enable delete button now that results are shown
                 try:
                     self.delete_selected_button.config(state=tk.NORMAL)
@@ -969,6 +1045,10 @@ class AudioAnalyzerGUI:
                     pass
             else:
                 self.status_var.set("No duplicate files found.")
+                try:
+                    self.stop_feedback("No duplicates")
+                except Exception:
+                    pass
                 messagebox.showinfo("Results", "No duplicate files found.")
                 try:
                     self.delete_selected_button.config(state=tk.DISABLED)
@@ -1121,6 +1201,10 @@ class AudioAnalyzerGUI:
     def _analyze_collection_thread(self, collection_path):
         """Thread function to parse collection without blocking the GUI"""
         try:
+            try:
+                self.start_feedback("Analyzing collection")
+            except Exception:
+                pass
             self.status_var.set(f"Loading Traktor collection from: {collection_path}")
             self.progress_var.set(0)
             
@@ -1139,6 +1223,10 @@ class AudioAnalyzerGUI:
             
             if not tracks:
                 self.status_var.set("No tracks found in collection or error parsing collection.nml")
+                try:
+                    self.stop_feedback("No tracks")
+                except Exception:
+                    pass
                 messagebox.showwarning("No Tracks", "Could not parse collection or no tracks found.")
                 return
             
@@ -1187,6 +1275,10 @@ class AudioAnalyzerGUI:
             
             self.status_var.set(f"Loaded {len(tracks)} tracks from Traktor collection.")
             self.progress_var.set(100)
+            try:
+                self.stop_feedback(f"Loaded {len(tracks)} tracks")
+            except Exception:
+                pass
             
         except Exception as e:
             self.status_var.set(f"Error: {str(e)}")
@@ -1246,19 +1338,27 @@ class AudioAnalyzerGUI:
     def _open_in_explorer(self, path):
         """Open the given file path in the system file explorer."""
         try:
+            # Normalize path
+            path = os.path.normpath(path)
             if os.path.isdir(path):
-                os.startfile(path)
-            else:
-                # Open containing folder and select file
-                if os.path.exists(path):
-                    # Windows-specific: use explorer /select,
-                    subprocess_cmd = f'explorer /select,"{path}"'
+                try:
+                    os.startfile(path)
+                    return
+                except Exception:
+                    pass
+
+            # Open containing folder and select file
+            if os.path.exists(path):
+                try:
+                    # explorer accepts '/select,fullpath'
+                    subprocess.Popen(["explorer", f"/select,{path}"])
+                except Exception:
                     try:
-                        os.system(subprocess_cmd)
+                        subprocess.Popen(["explorer", os.path.dirname(path)])
                     except Exception:
-                        os.startfile(os.path.dirname(path))
-                else:
-                    messagebox.showerror("File Not Found", f"Path not found: {path}")
+                        messagebox.showerror("Error", f"Could not open Explorer for: {path}")
+            else:
+                messagebox.showerror("File Not Found", f"Path not found: {path}")
         except Exception as e:
             messagebox.showerror("Error", f"Could not open file explorer: {e}")
 
