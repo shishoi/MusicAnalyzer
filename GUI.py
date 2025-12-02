@@ -200,6 +200,8 @@ class AudioAnalyzerGUI:
         self.tree.bind("<Double-1>", self.on_cell_double_click)
         # Bind Delete key to deletion handler
         self.tree.bind("<Delete>", lambda e: self.delete_selected_files())
+        # Bind right-click to context menu
+        self.tree.bind("<Button-3>", self._on_tree_right_click)
     
     def _setup_analyze_columns(self):
         """Set up columns for Analyze Files mode."""
@@ -732,28 +734,36 @@ class AudioAnalyzerGUI:
         self.playback_frame = ttk.Frame(self.main_frame)
         self.playback_frame.pack(fill=tk.X, pady=5)
 
-        self.play_label = ttk.Label(self.playback_frame, text="No track selected")
-        self.play_label.pack(side=tk.LEFT, padx=5)
+        # Button row (Play, Pause, Stop + slider)
+        button_row = ttk.Frame(self.playback_frame)
+        button_row.pack(fill=tk.X)
 
         self.play_pos_var = tk.DoubleVar()
         self.play_time_var = tk.StringVar(value="00:00/00:00")
         self._seeking = False
 
-        self.play_button = ttk.Button(self.playback_frame, text="Play", command=self.play_selected_file)
+        self.play_button = ttk.Button(button_row, text="Play", command=self.play_selected_file)
         self.play_button.pack(side=tk.LEFT, padx=2)
         self.play_button.config(text="▶️ Play")
-        self.pause_button = ttk.Button(self.playback_frame, text="Pause", command=self.pause_playback)
+        self.pause_button = ttk.Button(button_row, text="Pause", command=self.pause_playback)
         self.pause_button.pack(side=tk.LEFT, padx=2)
         self.pause_button.config(text="⏸️ Pause")
-        self.stop_button = ttk.Button(self.playback_frame, text="Stop", command=self.stop_playback)
+        self.stop_button = ttk.Button(button_row, text="Stop", command=self.stop_playback)
         self.stop_button.pack(side=tk.LEFT, padx=2)
         self.stop_button.config(text="⏹️ Stop")
 
-        self.pos_scale = ttk.Scale(self.playback_frame, from_=0, to=100, orient=tk.HORIZONTAL, variable=self.play_pos_var, command=self._on_seek)
+        self.pos_scale = ttk.Scale(button_row, from_=0, to=100, orient=tk.HORIZONTAL, variable=self.play_pos_var, command=self._on_seek)
         self.pos_scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6)
 
-        self.time_label = ttk.Label(self.playback_frame, textvariable=self.play_time_var)
+        self.time_label = ttk.Label(button_row, textvariable=self.play_time_var)
         self.time_label.pack(side=tk.LEFT, padx=5)
+
+        # Song name label row (below buttons)
+        label_row = ttk.Frame(self.playback_frame)
+        label_row.pack(fill=tk.X, pady=2)
+
+        self.play_label = ttk.Label(label_row, text="No track selected", font=("Arial", 10, "bold"))
+        self.play_label.pack(side=tk.LEFT, padx=5)
 
         # Disable controls if VLC not available; will be enabled if available
         if not _vlc_available:
@@ -1251,6 +1261,33 @@ class AudioAnalyzerGUI:
                     messagebox.showerror("File Not Found", f"Path not found: {path}")
         except Exception as e:
             messagebox.showerror("Error", f"Could not open file explorer: {e}")
+
+    def _on_tree_right_click(self, event):
+        """Handle right-click on treeview row. Show context menu."""
+        item = self.tree.identify_row(event.y)
+        if not item:
+            return
+        
+        # Select the row
+        self.tree.selection_set(item)
+        
+        # Get filepath from row
+        filepath = self.tree.set(item, "filepath")
+        if not filepath:
+            return
+        
+        # Create context menu
+        context_menu = tk.Menu(self.tree, tearoff=False)
+        context_menu.add_command(
+            label="Open in Explorer",
+            command=lambda: self._open_in_explorer(filepath)
+        )
+        
+        # Show context menu at cursor position
+        try:
+            context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            context_menu.grab_release()
 
     def _show_cover_popup(self, cover_path):
         """Show cover art in a popup window. Uses PIL if available."""
