@@ -114,13 +114,12 @@ class AudioAnalyzerGUI:
         )
         self.delete_selected_button.pack(side=tk.LEFT, padx=5)
 
-        # Create table frame
-        self.table_frame = ttk.Frame(self.main_frame)
-        self.table_frame.pack(fill=tk.BOTH, expand=True, pady=10)
-        
-        # Create treeview (table)
-        self.create_treeview()
-        
+        # Initialize playback controls and VLC player (if available)
+        try:
+            self._init_playback_controls()
+        except Exception:
+            pass
+
         # Progress bar
         self.progress_var = tk.DoubleVar()
         self.progress_bar = ttk.Progressbar(
@@ -129,18 +128,19 @@ class AudioAnalyzerGUI:
             maximum=100
         )
         self.progress_bar.pack(fill=tk.X, pady=5)
+
+        # Create table frame
+        self.table_frame = ttk.Frame(self.main_frame)
+        self.table_frame.pack(fill=tk.BOTH, expand=True, pady=10)
+        
+        # Create treeview (table)
+        self.create_treeview()
         
         # Status bar
         self.status_var = tk.StringVar()
         self.status_var.set("Ready")
         self.status_bar = ttk.Label(root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
-
-        # Initialize playback controls and VLC player (if available)
-        try:
-            self._init_playback_controls()
-        except Exception:
-            pass
 
         # VLC player setup
         self.vlc_available = _vlc_available
@@ -728,7 +728,7 @@ class AudioAnalyzerGUI:
 
 
     def _init_playback_controls(self):
-        """Create single playback control area below the table."""
+        """Create single playback control area below main buttons, above table."""
         self.playback_frame = ttk.Frame(self.main_frame)
         self.playback_frame.pack(fill=tk.X, pady=5)
 
