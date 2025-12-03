@@ -925,17 +925,61 @@ def parse_traktor_collection(collection_path):
             track = {}
 
             # Extract basic attributes from ENTRY element
-            # Traktor can store location in 'LOCATION' attribute, or split into 'DIR' + 'FILE', or use file:// URLs
-            location = entry.get('LOCATION', '') or ''
+            # Traktor can store location as:
+            # 1. LOCATION subelement with VOLUME, DIR, FILE attributes
+            # 2. LOCATION attribute (direct file:// URL or path)
+            # 3. DIR + FILE attributes directly
+            
+            location = ''
+            
+            # Try LOCATION subelement first (most common in recent Traktor)
+            loc_elem = entry.find('LOCATION')
+            if loc_elem is not None:
+                volume = loc_elem.get('VOLUME', '')
+                dir_attr = loc_elem.get('DIR', '')
+                file_attr = loc_elem.get('FILE', '')
+                
+                # Reconstruct path: VOLUME + DIR + FILE
+                # VOLUME contains drive letter (e.g., "C:")
+                # DIR contains path with colons as separators (e.g., "/:Users/:home/:Music/")
+                # FILE contains filename (e.g., "song.mp3")
+                
+                parts = []
+                if volume:
+                    # Volume is already "C:" format
+                    vol = volume.strip()
+                    if vol:
+                        parts.append(vol)
+                
+                if dir_attr:
+                    # Remove leading/trailing slashes, replace / with \, remove colons used as separators
+                    d = dir_attr.strip('/').replace('/', '\\').replace(':', '')
+                    if d:
+                        parts.append(d)
+                
+                if file_attr:
+                    f = file_attr.strip()
+                    if f:
+                        parts.append(f)
+                
+                if parts:
+                    location = '\\'.join(parts)
+                    # Final cleanup for valid Windows path
+                    location = location.replace('\\\\', '\\')
+            
+            # Fallback: try LOCATION attribute
             if not location:
-                # Try DIR and FILE attributes
+                location = entry.get('LOCATION', '') or ''
+            
+            # Fallback: try DIR + FILE attributes on ENTRY
+            if not location:
                 dir_attr = entry.get('DIR', '') or entry.get('DIRECTORY', '')
                 file_attr = entry.get('FILE', '') or entry.get('FILENAME', '')
                 if dir_attr or file_attr:
                     try:
                         location = os.path.join(dir_attr, file_attr)
                     except Exception:
-                        location = dir_attr + file_attr
+                        location = (dir_attr or '') + (file_attr or '')
 
             # If location is a file:// URL, parse it
             if location.startswith('file://'):

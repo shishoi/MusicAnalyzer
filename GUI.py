@@ -67,7 +67,42 @@ class AudioAnalyzerGUI:
         self.button_frame = ttk.Frame(self.main_frame)
         self.button_frame.pack(fill=tk.X, pady=10)
         
-        # Add buttons
+        # Add buttons (reordered and renamed)
+        # 1. Find Duplicates
+        self.find_duplicates_button = ttk.Button(
+            self.button_frame, 
+            text="🗐 Find Duplicates", 
+            command=self.find_duplicates,
+            width=20
+        )
+        self.find_duplicates_button.pack(side=tk.LEFT, padx=5)
+        ToolTip(self.find_duplicates_button, 
+                "Detect duplicate audio files using BPM, duration, and similarity scoring")
+        
+        # 2. Rename Files (placeholder)
+        self.rename_files_button = ttk.Button(
+            self.button_frame,
+            text="📝 Rename Files",
+            command=self.rename_files,
+            width=20,
+            state=tk.DISABLED  # Will enable when rename feature is implemented
+        )
+        self.rename_files_button.pack(side=tk.LEFT, padx=5)
+        ToolTip(self.rename_files_button,
+                "Remove illegal characters from filenames/titles to prevent software crashes")
+        
+        # 3. My Collection
+        self.collection_button = ttk.Button(
+            self.button_frame,
+            text="🎵 My Collection",
+            command=self.analyze_collection,
+            width=20
+        )
+        self.collection_button.pack(side=tk.LEFT, padx=5)
+        ToolTip(self.collection_button,
+                "Display and analyze your DJ collection (Traktor/Recordbox/Serato)")
+        
+        # 4. Analyze Files
         self.analyze_button = ttk.Button(
             self.button_frame, 
             text="🔍 Analyze Files", 
@@ -75,7 +110,10 @@ class AudioAnalyzerGUI:
             width=20
         )
         self.analyze_button.pack(side=tk.LEFT, padx=5)
+        ToolTip(self.analyze_button,
+                "Analyze audio files: BPM detection, key analysis, CUE point detection")
         
+        # 5. Save Changes
         self.save_button = ttk.Button(
             self.button_frame, 
             text="💾 Save Changes", 
@@ -84,28 +122,10 @@ class AudioAnalyzerGUI:
             state=tk.DISABLED  # Initially disabled
         )
         self.save_button.pack(side=tk.LEFT, padx=5)
+        ToolTip(self.save_button, 
+                "Save analysis results:\n- MP3 tags: Title, BPM, Key\n- Traktor CUE points: Intro, Build, Drop, Outro")
         
-        # Add tooltip to Save Changes button
-        save_tooltip_text = "Saves analysis results:\n- MP3 tags: Title, BPM, Key\n- Traktor CUE points: Intro, Build, Drop, Outro"
-        ToolTip(self.save_button, save_tooltip_text)
-        
-        self.find_duplicates_button = ttk.Button(
-            self.button_frame, 
-            text="🗐 Find Duplicate Files", 
-            command=self.find_duplicates,
-            width=20
-        )
-        self.find_duplicates_button.pack(side=tk.LEFT, padx=5)
-
-        self.collection_button = ttk.Button(
-            self.button_frame,
-            text="🎵 Analyze Collection",
-            command=self.analyze_collection,
-            width=20
-        )
-        self.collection_button.pack(side=tk.LEFT, padx=5)
-
-        # Button to delete selected files (enabled when duplicate results shown)
+        # 6. Delete Selected
         self.delete_selected_button = ttk.Button(
             self.button_frame,
             text="🗑️ Delete Selected",
@@ -114,6 +134,8 @@ class AudioAnalyzerGUI:
             state=tk.DISABLED
         )
         self.delete_selected_button.pack(side=tk.LEFT, padx=5)
+        ToolTip(self.delete_selected_button,
+                "Delete selected files to Recycle Bin")
 
         # Initialize playback controls and VLC player (if available)
         try:
@@ -320,8 +342,8 @@ class AudioAnalyzerGUI:
         
         # Define columns width
         self.tree.column("filepath", width=250)
-        self.tree.column("title", width=180)
-        self.tree.column("artist", width=120)
+        self.tree.column("title", width=250)
+        self.tree.column("artist", width=200)
         self.tree.column("remixer", width=100)
         self.tree.column("producer", width=100)
         self.tree.column("album", width=120)
@@ -329,11 +351,11 @@ class AudioAnalyzerGUI:
         self.tree.column("label", width=100)
         self.tree.column("catalogno", width=80)
         self.tree.column("release_date", width=80)
-        self.tree.column("track_number", width=60)
-        self.tree.column("bpm", width=50)
-        self.tree.column("key", width=40)
-        self.tree.column("key_text", width=60)
-        self.tree.column("bitrate", width=80)
+        self.tree.column("track_number", width=20)
+        self.tree.column("bpm", width=30)
+        self.tree.column("key", width=30)
+        self.tree.column("key_text", width=250)
+        self.tree.column("bitrate", width=30)
         self.tree.column("length", width=60)
         self.tree.column("autogain", width=70)
         self.tree.column("rating", width=50)
@@ -1172,6 +1194,14 @@ class AudioAnalyzerGUI:
             except Exception:
                 pass
 
+    def rename_files(self):
+        """Placeholder for rename files feature"""
+        messagebox.showinfo(
+            "Rename Files",
+            "This feature will rename files to remove illegal characters.\n\n"
+            "Coming soon: Remove illegal characters from filenames/titles."
+        )
+
     def analyze_collection(self):
         """Load and display Traktor collection."""
         # First, try to load saved collection path
@@ -1336,7 +1366,7 @@ class AudioAnalyzerGUI:
             self.tree.move(item, '', idx)
 
     def _open_in_explorer(self, path):
-        """Open the given file path in the system file explorer."""
+        """Open the given file path in the system file explorer and select it in the table."""
         try:
             # Strip whitespace
             path = str(path).strip() if path else ""
@@ -1372,6 +1402,14 @@ class AudioAnalyzerGUI:
             # Debug: print what we're trying to open
             print(f"DEBUG _open_in_explorer: normalized path = '{path}'")
             print(f"DEBUG: exists = {os.path.exists(path)}, isdir = {os.path.isdir(path) if os.path.exists(path) else 'N/A'}")
+            
+            # Find and select the row in the treeview with matching filepath
+            for item in self.tree.get_children():
+                item_filepath = self.tree.set(item, "filepath").strip()
+                if os.path.normpath(item_filepath) == path:
+                    self.tree.selection_set(item)
+                    self.tree.see(item)
+                    break
             
             # If it's a directory, just open it
             if os.path.isdir(path):
