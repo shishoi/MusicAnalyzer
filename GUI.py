@@ -209,7 +209,7 @@ class AudioAnalyzerGUI:
         self.analyze_columns = ("filepath", "orig_bpm", "analyzed_bpm", "key", "traktor_key", "intro", "build", "drop", "outro")
         
         # Columns for "Find Duplicates" mode
-        self.duplicates_columns = ("filepath", "title", "artists", "bitrate", "length", "size_mb", "BPM", "year")
+        self.duplicates_columns = ("filepath", "title", "artists", "album", "bitrate", "length", "size_mb", "BPM", "year")
         
         # Start with duplicates columns (neutral default)
         columns = self.duplicates_columns
@@ -228,6 +228,7 @@ class AudioAnalyzerGUI:
         scrollbar_x.config(command=self.tree.xview)
         
         # Define headings for duplicates mode (will be overridden when switching modes)
+
         self._setup_duplicates_columns()
         
         # Pack treeview
@@ -370,7 +371,6 @@ class AudioAnalyzerGUI:
         # Store sort state
         self.sort_column = None
         self.sort_reverse = False
-    
     
     def on_cell_double_click(self, event):
         """Handle double-click on a cell to edit the value"""
@@ -1319,51 +1319,11 @@ class AudioAnalyzerGUI:
         if self.current_mode != 'collection':
             return
         
+
+    # (load_more feature removed)
+        
         # Get the column that was clicked
-        region = self.tree.identify_region(event.x, event.y)
-        if region != "heading":
-            return
         
-        col = self.tree.identify_column(event.x)
-        col_index = int(col[1:]) - 1
-        
-        if col_index < 0 or col_index >= len(self.collection_columns):
-            return
-        
-        column = self.collection_columns[col_index]
-        
-        # Determine sort direction
-        if self.sort_column == column:
-            self.sort_reverse = not self.sort_reverse
-        else:
-            self.sort_column = column
-            self.sort_reverse = False
-        
-        # Get all items
-        items = self.tree.get_children()
-        values_list = []
-        
-        for item in items:
-            values = self.tree.item(item, 'values')
-            values_list.append((item, values))
-        
-        # Sort based on the column
-        try:
-            # Try to sort numerically first
-            values_list.sort(
-                key=lambda x: float(x[1][col_index]) if x[1][col_index] else 0,
-                reverse=self.sort_reverse
-            )
-        except (ValueError, IndexError):
-            # Fall back to string sorting
-            values_list.sort(
-                key=lambda x: str(x[1][col_index]) if col_index < len(x[1]) else "",
-                reverse=self.sort_reverse
-            )
-        
-        # Reorder items in treeview
-        for idx, (item, _) in enumerate(values_list):
-            self.tree.move(item, '', idx)
 
     def _open_in_explorer(self, path):
         """Open the given file path in the system file explorer and select it in the table."""
