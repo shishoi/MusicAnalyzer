@@ -230,41 +230,43 @@ class AudioAnalyzer:
         # Traktor's KEY format mapping
         # For Traktor: d = major (dur), m = minor (moll)
         key_map = {
-            'C Major': ('8d', 'C'),
-            'C# Major': ('3d', 'C#'),
-            'Db Major': ('3d', 'Db'),
-            'D Major': ('10d', 'D'),
-            'D# Major': ('5d', 'D#'),
-            'Eb Major': ('5d', 'Eb'),
-            'E Major': ('12d', 'E'),
-            'F Major': ('7d', 'F'),
-            'F# Major': ('2d', 'F#'),
-            'Gb Major': ('2d', 'Gb'),
-            'G Major': ('9d', 'G'),
-            'G# Major': ('4d', 'G#'),
-            'Ab Major': ('4d', 'Ab'),
-            'A Major': ('11d', 'A'),
-            'A# Major': ('6d', 'A#'),
-            'Bb Major': ('6d', 'Bb'),
-            'B Major': ('1d', 'B'),
-            'C Minor': ('5m', 'Cm'),
-            'C# Minor': ('12m', 'C#m'),
-            'Db Minor': ('12m', 'Dbm'),
-            'D Minor': ('7m', 'Dm'),
-            'D# Minor': ('2m', 'D#m'),
-            'Eb Minor': ('2m', 'Ebm'),
-            'E Minor': ('9m', 'Em'),
-            'F Minor': ('4m', 'Fm'),
-            'F# Minor': ('11m', 'F#m'),
-            'Gb Minor': ('11m', 'Gbm'),
-            'G Minor': ('6m', 'Gm'),
-            'G# Minor': ('1m', 'G#m'),
-            'Ab Minor': ('1m', 'Abm'),
-            'A Minor': ('8m', 'Am'),
-            'A# Minor': ('3m', 'A#m'),
-            'Bb Minor': ('3m', 'Bbm'),
-            'B Minor': ('10m', 'Bm')
+        'C Major':  ('8B',  'C'),
+        'C# Major': ('3B',  'C#'),
+        'Db Major': ('3B',  'Db'),
+        'D Major':  ('10B', 'D'),
+        'D# Major': ('5B',  'D#'),
+        'Eb Major': ('5B',  'Eb'),
+        'E Major':  ('12B', 'E'),
+        'F Major':  ('7B',  'F'),
+        'F# Major': ('2B',  'F#'),
+        'Gb Major': ('2B',  'Gb'),
+        'G Major':  ('9B',  'G'),
+        'G# Major': ('4B',  'G#'),
+        'Ab Major': ('4B',  'Ab'),
+        'A Major':  ('11B', 'A'),
+        'A# Major': ('6B',  'A#'),
+        'Bb Major': ('6B',  'Bb'),
+        'B Major':  ('1B',  'B'),
+
+        'C Minor':  ('5A',  'Cm'),
+        'C# Minor': ('12A', 'C#m'),
+        'Db Minor': ('12A', 'Dbm'),
+        'D Minor':  ('7A',  'Dm'),
+        'D# Minor': ('2A',  'D#m'),
+        'Eb Minor': ('2A',  'Ebm'),
+        'E Minor':  ('9A',  'Em'),
+        'F Minor':  ('4A',  'Fm'),
+        'F# Minor': ('11A', 'F#m'),
+        'Gb Minor': ('11A', 'Gbm'),
+        'G Minor':  ('6A',  'Gm'),
+        'G# Minor': ('1A',  'G#m'),
+        'Ab Minor': ('1A',  'Abm'),
+        'A Minor':  ('8A',  'Am'),
+        'A# Minor': ('3A',  'A#m'),
+        'Bb Minor': ('3A',  'Bbm'),
+        'B Minor':  ('10A', 'Bm'),
         }
+
         
         # Get Traktor's KEY and KEY TEXT formats
         full_key = f"{note} {mode}"
@@ -537,6 +539,8 @@ def find_duplicate_songs(directory, tolerance_sec=3.0, progress_callback=None):
                 'duration': None,
                 'title': None,
                 'artist': None,
+                'album': None,
+                'contrib_artist': None,
                 'bitrate': None
             }
             
@@ -550,6 +554,19 @@ def find_duplicate_songs(directory, tolerance_sec=3.0, progress_callback=None):
                     metadata['title'] = audio['title'][0] if audio['title'] else None
                 if 'artist' in audio:
                     metadata['artist'] = audio['artist'][0] if audio['artist'] else None
+                # Try to extract album and contributing/album artist
+                if 'album' in audio:
+                    metadata['album'] = audio['album'][0] if audio['album'] else None
+                # Common alternate keys for contributing/album artist
+                contrib = None
+                if 'albumartist' in audio:
+                    contrib = audio['albumartist'][0] if audio['albumartist'] else None
+                elif 'contributingartist' in audio:
+                    contrib = audio['contributingartist'][0] if audio['contributingartist'] else None
+                elif 'performer' in audio:
+                    contrib = audio['performer'][0] if audio['performer'] else None
+                if contrib:
+                    metadata['contrib_artist'] = contrib
                 if hasattr(audio.info, "bitrate"):
                     metadata['bitrate'] = audio.info.bitrate
             
@@ -735,6 +752,8 @@ def find_duplicate_songs(directory, tolerance_sec=3.0, progress_callback=None):
             sizes = []
             durations = []
             titles = []
+            albums = []
+            contribs = []
             for p in group:
                 m = metadata_map.get(p)
                 if m:
@@ -743,6 +762,10 @@ def find_duplicate_songs(directory, tolerance_sec=3.0, progress_callback=None):
                         durations.append(m.get('duration'))
                     if m.get('title'):
                         titles.append(m.get('title'))
+                    if m.get('album'):
+                        albums.append(m.get('album'))
+                    if m.get('contrib_artist'):
+                        contribs.append(m.get('contrib_artist'))
 
             size_sim = 0.0
             if len(sizes) >= 2:
@@ -774,8 +797,31 @@ def find_duplicate_songs(directory, tolerance_sec=3.0, progress_callback=None):
                     most_common_count = c.most_common(1)[0][1]
                     title_factor = most_common_count / len(titles)
 
-            # Weighted score: filename (0.5), size (0.2), duration (0.2), title (0.1)
-            score = (0.5 * fname_sim) + (0.2 * size_sim) + (0.2 * dur_sim) + (0.1 * title_factor)
+            # Album match factor
+            album_factor = 0.0
+            if albums:
+                from collections import Counter as _CounterA
+                ca = _CounterA([a.lower() for a in albums if a])
+                if ca:
+                    album_factor = ca.most_common(1)[0][1] / len(albums)
+
+            # Contributing artist match factor
+            contrib_factor = 0.0
+            if contribs:
+                from collections import Counter as _CounterC
+                cc = _CounterC([c.lower() for c in contribs if c])
+                if cc:
+                    contrib_factor = cc.most_common(1)[0][1] / len(contribs)
+
+            # Weighted score: filename (0.45), size (0.18), duration (0.15), title (0.09), album (0.08), contrib artist (0.05)
+            score = (
+                0.45 * fname_sim
+                + 0.18 * size_sim
+                + 0.15 * dur_sim
+                + 0.09 * title_factor
+                + 0.08 * album_factor
+                + 0.05 * contrib_factor
+            )
             return score
 
         # Compute scores and sort groups descending
