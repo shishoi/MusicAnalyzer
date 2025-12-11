@@ -216,7 +216,7 @@ class AudioAnalyzerGUI:
         self.analyze_columns = ("filepath", "orig_bpm", "analyzed_bpm", "key", "traktor_key", "intro", "build", "drop", "outro")
         
         # Columns for "Find Duplicates" mode
-        self.duplicates_columns = ("filepath", "title", "artists", "album", "bitrate", "length", "size_mb", "BPM", "year")
+        self.duplicates_columns = ("filepath", "title", "artists", "album", "bitrate", "length", "size_mb", "BPM", "year", "has_cover")
         
         # Start with duplicates columns (neutral default)
         columns = self.duplicates_columns
@@ -298,6 +298,7 @@ class AudioAnalyzerGUI:
         self.tree.heading("size_mb", text="Size (MB)")
         self.tree.heading("BPM", text="BPM")
         self.tree.heading("year", text="Year")
+        self.tree.heading("has_cover", text="Cover")
         
         # Define columns width
         self.tree.column("filepath", width=450)
@@ -309,6 +310,7 @@ class AudioAnalyzerGUI:
         self.tree.column("size_mb", width=30)
         self.tree.column("BPM", width=30)
         self.tree.column("year", width=30)
+        self.tree.column("has_cover", width=40)
     
     def _setup_collection_columns(self):
         """Set up columns for Collection Analysis mode."""
@@ -690,7 +692,7 @@ class AudioAnalyzerGUI:
 
 
     def _get_file_metadata(self, file_path):
-        """Return metadata for a file: title, bitrate (e.g. '320 kbps'), length (mm:ss), size_mb (string), artists, album, bpm, year."""
+        """Return metadata for a file: title, bitrate (e.g. '320 kbps'), length (mm:ss), size_mb (string), artists, album, bpm, year, has_cover."""
         meta = {
             'title': None,
             'bitrate': None,
@@ -699,7 +701,8 @@ class AudioAnalyzerGUI:
             'artists': None,
             'album': None,
             'bpm': None,
-            'year': None
+            'year': None,
+            'has_cover': 0
         }
 
         # Size in MB with 2 decimals
@@ -781,6 +784,46 @@ class AudioAnalyzerGUI:
                     meta['bpm'] = audio.get('TBPM')[0]
             except Exception:
                 pass
+
+            # Check for cover art
+            try:
+                meta['has_cover'] = 0
+                if info is not None:
+                    has_picture = False
+                    # Branch by container type to avoid false positives
+                    info_type = type(info).__name__
+                    # MP3: require APIC frame with real image mime and data
+                    if info_type in ('MP3', 'EasyMP3') or 'mp3' in str(info.__class__).lower():
+                        if hasattr(info, 'tags') and info.tags is not None:
+                            allowed_mimes = {'image/jpeg', 'image/jpg', 'image/png'}
+                            def looks_like_image(data_bytes: bytes) -> bool:
+                                try:
+                                    # JPEG starts with 0xFF 0xD8 and ends with 0xFF 0xD9
+                                    if len(data_bytes) >= 4 and data_bytes[:2] == b"\xFF\xD8":
+                                        return True
+                                    # PNG starts with 89 50 4E 47 0D 0A 1A 0A
+                                    if len(data_bytes) >= 8 and data_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+                                        return True
+                                except Exception:
+                                    return False
+                                return False
+                            for key, frame in info.tags.items():
+                                if 'APIC' in key:
+                                    mime = (getattr(frame, 'mime', '') or '').lower()
+                                    data = getattr(frame, 'data', b'') or b''
+                                    # Count any valid embedded image (not only FrontCover)
+                                    if (mime in allowed_mimes) and len(data) >= 1024 and looks_like_image(data):
+                                        has_picture = True
+                                        break
+                    # FLAC/OGG: metadata_block_picture present
+                    elif info_type in ('FLAC', 'OggVorbis') or str(info.__class__).find('flac') != -1 or str(info.__class__).find('ogg') != -1:
+                        has_picture = ('metadata_block_picture' in info)
+                    # MP4/M4A: covr atom present
+                    elif info_type in ('MP4',) or str(info.__class__).find('mp4') != -1:
+                        has_picture = ('covr' in info)
+                    meta['has_cover'] = 1 if has_picture else 0
+            except Exception:
+                meta['has_cover'] = 0
 
         except ImportError:
             # mutagen not available — set some defaults
@@ -1070,7 +1113,8 @@ class AudioAnalyzerGUI:
                                 meta.get('length') or "",
                                 meta.get('size_mb') or "",
                                 meta.get('bpm') or "",
-                                meta.get('year') or ""
+                                meta.get('year') or "",
+                                meta.get('has_cover', 0)
                             ),
                             tags=(tag_name,)
                         )
