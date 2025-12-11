@@ -77,7 +77,14 @@ class AudioAnalyzerGUI:
         )
         self.find_duplicates_button.pack(side=tk.LEFT, padx=5)
         ToolTip(self.find_duplicates_button, 
-                "Detect duplicate audio files using BPM, duration, and similarity scoring")
+                "Detect duplicate audio files using intelligent scoring:\n"
+                "• Filename Similarity (50%)\n"
+                "• Album Match (15%)\n"
+                "• Artist Match (15%)\n"
+                "• File Size (10%)\n"
+                "• Duration (10%)\n"
+                "• Title Match (10%)\n"
+                "Groups ranked by confidence score.")
         
         # 2. Rename Files (placeholder)
         self.rename_files_button = ttk.Button(
@@ -285,6 +292,7 @@ class AudioAnalyzerGUI:
         self.tree.heading("filepath", text="File Path")
         self.tree.heading("title", text="Title")
         self.tree.heading("artists", text="Contributing Artists")
+        self.tree.heading("album", text="Album")
         self.tree.heading("bitrate", text="Bit Rate")
         self.tree.heading("length", text="Length")
         self.tree.heading("size_mb", text="Size (MB)")
@@ -295,6 +303,7 @@ class AudioAnalyzerGUI:
         self.tree.column("filepath", width=450)
         self.tree.column("title", width=250)
         self.tree.column("artists", width=180)
+        self.tree.column("album", width=200)
         self.tree.column("bitrate", width=30)
         self.tree.column("length", width=30)
         self.tree.column("size_mb", width=30)
@@ -681,13 +690,14 @@ class AudioAnalyzerGUI:
 
 
     def _get_file_metadata(self, file_path):
-        """Return metadata for a file: title, bitrate (e.g. '320 kbps'), length (mm:ss), size_mb (string), artists, bpm, year."""
+        """Return metadata for a file: title, bitrate (e.g. '320 kbps'), length (mm:ss), size_mb (string), artists, album, bpm, year."""
         meta = {
             'title': None,
             'bitrate': None,
             'length': None,
             'size_mb': None,
             'artists': None,
+            'album': None,
             'bpm': None,
             'year': None
         }
@@ -727,6 +737,15 @@ class AudioAnalyzerGUI:
                     except Exception:
                         artists = None
                 meta['artists'] = artists
+
+                # Album
+                album = None
+                if 'album' in audio:
+                    try:
+                        album = audio.get('album')[0]
+                    except Exception:
+                        album = None
+                meta['album'] = album
 
                 # Year
                 year = None
@@ -1046,6 +1065,7 @@ class AudioAnalyzerGUI:
                                 file_path,
                                 meta.get('title') or filename,
                                 meta.get('artists') or "",
+                                meta.get('album') or "",
                                 meta.get('bitrate') or "",
                                 meta.get('length') or "",
                                 meta.get('size_mb') or "",
