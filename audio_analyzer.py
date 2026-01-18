@@ -631,29 +631,93 @@ def find_duplicate_songs(directory, tolerance_sec=3.0, progress_callback=None):
     duplicates = []
     total_groups = len(duration_groups)
     
+    # Version keywords that indicate different track versions
+    VERSION_KEYWORDS = [
+        'remix', 'rmx', 'radio edit', 'radio version', 'original mix',
+        'extended', 'extended mix', 'club mix', 'dub', 'instrumental',
+        'acapella', 'a cappella', 'vocal mix', 'club version', 'edit',
+        'remaster', 'remastered', 'vip', 'bootleg', 'mashup', 'rework',
+        'radio', 'club', 'version', 'original', 'mix'
+    ]
+
+    def normalize_string(text):
+        """Normalize string for comparison: lowercase, remove separators, special chars."""
+        if not text:
+            return ""
+        import re
+        # Convert to lowercase
+        text = text.lower()
+        # Remove file extensions
+        text = re.sub(r'\.(mp3|wav|flac|m4a|aac|ogg|wma|aiff|alac)$', '', text)
+        # Replace common separators with spaces
+        text = re.sub(r'[_\-\.+]', ' ', text)
+        # Remove special characters (keep only alphanumeric and spaces)
+        text = re.sub(r'[^\w\s]', ' ', text)
+        # Remove extra whitespace
+        text = ' '.join(text.split())
+        return text
+
+    def extract_version_keywords(text):
+        """Extract version keywords from text."""
+        if not text:
+            return set()
+        text_lower = text.lower()
+        found = set()
+        for keyword in VERSION_KEYWORDS:
+            # Use word boundaries to avoid partial matches
+            import re
+            if re.search(r'\b' + re.escape(keyword) + r'\b', text_lower):
+                found.add(keyword)
+        return found
+
+    def strip_version_keywords(text):
+        """Remove version keywords from text for comparison."""
+        if not text:
+            return text
+        result = text
+        for keyword in VERSION_KEYWORDS:
+            # Case-insensitive replacement with word boundaries
+            import re
+            result = re.sub(r'\b' + re.escape(keyword) + r'\b', '', result, flags=re.IGNORECASE)
+        # Clean up extra spaces
+        result = ' '.join(result.split())
+        return result
+
     # Function to calculate filename similarity
     def filename_similarity(name1, name2):
-        # Remove file extension
-        name1 = os.path.splitext(name1)[0].lower()
-        name2 = os.path.splitext(name2)[0].lower()
+        """Calculate similarity between two filenames using RapidFuzz with normalization."""
+        # Normalize both names
+        name1_norm = normalize_string(name1)
+        name2_norm = normalize_string(name2)
         
-        # Try to use Levenshtein distance if available
+        # Strip version keywords
+        name1_stripped = strip_version_keywords(name1_norm)
+        name2_stripped = strip_version_keywords(name2_norm)
+        
+        # Use RapidFuzz for similarity (falls back to basic comparison if unavailable)
         try:
-            import Levenshtein
-            distance = Levenshtein.distance(name1, name2)
-            max_len = max(len(name1), len(name2))
-            
-            # Convert to similarity score (0-1)
-            if max_len == 0:
-                return 0
-            return 1 - (distance / max_len)
+            from rapidfuzz import fuzz
+            # token_set_ratio ignores word order and duplicates - best for song names
+            similarity = fuzz.token_set_ratio(name1_stripped, name2_stripped) / 100.0
+            return similarity
         except ImportError:
-            # Simple fallback if Levenshtein is not installed
-            common_chars = sum(1 for c in name1 if c in name2)
-            max_len = max(len(name1), len(name2))
-            if max_len == 0:
-                return 0
-            return common_chars / max_len
+            # Fallback to Levenshtein if RapidFuzz not available
+            try:
+                import Levenshtein
+                distance = Levenshtein.distance(name1_stripped, name2_stripped)
+                max_len = max(len(name1_stripped), len(name2_stripped))
+                if max_len == 0:
+                    return 1.0
+                return 1.0 - (distance / max_len)
+            except ImportError:
+                # Simple fallback if neither library is available
+                if not name1_stripped or not name2_stripped:
+                    return 0.0
+                common_chars = sum(1 for c in name1_stripped if c in name2_stripped)
+                max_len = max(len(name1_stripped), len(name2_stripped))
+                if max_len == 0:
+                    return 0.0
+                return common_chars / max_len
     
     # Find true duplicates in each duration group
     for i, group in enumerate(duration_groups):
@@ -790,9 +854,16 @@ def find_duplicate_songs(directory, tolerance_sec=3.0, progress_callback=None):
             # Title match factor: proportion of matching titles
             title_factor = 0.0
             if titles:
-                # count most common title matches
+                # Normalize and strip version keywords from titles
                 from collections import Counter
-                c = Counter([t.lower() for t in titles if t])
+                normalized_titles = []
+                for t in titles:
+                    if t:
+                        t_norm = normalize_string(t)
+                        t_stripped = strip_version_keywords(t_norm)
+                        normalized_titles.append(t_stripped)
+                
+                c = Counter(normalized_titles)
                 if c:
                     most_common_count = c.most_common(1)[0][1]
                     title_factor = most_common_count / len(titles)
@@ -813,15 +884,43 @@ def find_duplicate_songs(directory, tolerance_sec=3.0, progress_callback=None):
                 if cc:
                     contrib_factor = cc.most_common(1)[0][1] / len(contribs)
 
-            # Weighted score: filename (0.45), size (0.18), duration (0.15), title (0.09), album (0.08), contrib artist (0.05)
+            # Weighted score: filename (0.30), size (0.07), duration (0.07), title (0.13), album (0.13), contrib artist (0.30)
+            
+            # Minimum metadata threshold: require strong artist OR title match
+            # This prevents grouping completely different songs with similar duration
+            metadata_match = max(contrib_factor, title_factor)
+            if metadata_match < 0.5:
+                # If neither artist nor title match well, reject this group
+                return 0.0
+            
+            # Detect version keyword mismatches
+            version_penalty = 1.0
+            for p in group:
+                fname_versions = extract_version_keywords(os.path.basename(p))
+                m = metadata_map.get(p)
+                title_versions = extract_version_keywords(m.get('title', '')) if m else set()
+                all_versions = fname_versions | title_versions
+                
+                # Compare with first file in group
+                if p != group[0]:
+                    fname_v0 = extract_version_keywords(os.path.basename(group[0]))
+                    m0 = metadata_map.get(group[0])
+                    title_v0 = extract_version_keywords(m0.get('title', '')) if m0 else set()
+                    all_v0 = fname_v0 | title_v0
+                    
+                    # If version keywords differ, apply penalty
+                    if all_versions != all_v0 and (all_versions or all_v0):
+                        version_penalty = 0.5
+                        break
+            
             score = (
-                0.45 * fname_sim
-                + 0.18 * size_sim
-                + 0.15 * dur_sim
-                + 0.09 * title_factor
-                + 0.08 * album_factor
-                + 0.05 * contrib_factor
-            )
+                0.30 * fname_sim
+                + 0.07 * size_sim
+                + 0.07 * dur_sim
+                + 0.13 * title_factor
+                + 0.13 * album_factor
+                + 0.30 * contrib_factor
+            ) * version_penalty
             return score
 
         # Compute scores and sort groups descending

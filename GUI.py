@@ -97,8 +97,19 @@ class AudioAnalyzerGUI:
         self.rename_files_button.pack(side=tk.LEFT, padx=5)
         ToolTip(self.rename_files_button,
                 "Remove illegal characters from filenames/titles to prevent software crashes")
-        
-        # 3. My Collection
+
+        # 3. Quality Check
+        self.quality_check_button = ttk.Button(
+            self.button_frame,
+            text="✓ Quality Check",
+            command=self.quality_check,
+            width=20
+        )
+        self.quality_check_button.pack(side=tk.LEFT, padx=5)
+        ToolTip(self.quality_check_button,
+                "Check audio quality: bitrate, sample rate, format, missing metadata")
+
+        # 4. My Collection
         self.collection_button = ttk.Button(
             self.button_frame,
             text="🎵 My Collection",
@@ -109,7 +120,7 @@ class AudioAnalyzerGUI:
         ToolTip(self.collection_button,
                 "Display and analyze your DJ collection (Traktor/Recordbox/Serato)")
         
-        # 4. Analyze Files
+        # 5. Analyze Files
         self.analyze_button = ttk.Button(
             self.button_frame, 
             text="🔍 Analyze Files", 
@@ -120,7 +131,7 @@ class AudioAnalyzerGUI:
         ToolTip(self.analyze_button,
                 "Analyze audio files: BPM detection, key analysis, CUE point detection")
         
-        # 5. Save Changes
+        # 6. Save Changes
         self.save_button = ttk.Button(
             self.button_frame, 
             text="💾 Save Changes", 
@@ -132,7 +143,7 @@ class AudioAnalyzerGUI:
         ToolTip(self.save_button, 
                 "Save analysis results:\n- MP3 tags: Title, BPM, Key\n- Traktor CUE points: Intro, Build, Drop, Outro")
         
-        # 6. Delete Selected
+        # 7. Delete Selected
         self.delete_selected_button = ttk.Button(
             self.button_frame,
             text="🗑️ Delete Selected",
@@ -1264,6 +1275,588 @@ class AudioAnalyzerGUI:
             "Rename Files",
             "This feature will rename files to remove illegal characters.\n\n"
             "Coming soon: Remove illegal characters from filenames/titles."
+        )
+
+    def quality_check(self):
+        """Analyze audio quality using spectrum analysis"""
+        # Create dialog to choose scan mode
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Quality Check - Select Scan Mode")
+        dialog.geometry("400x200")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Center the dialog
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_reqwidth() // 2)
+        y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_reqheight() // 2)
+        dialog.geometry(f"+{x}+{y}")
+        
+        ttk.Label(dialog, text="Select scan mode:", font=('Arial', 12, 'bold')).pack(pady=20)
+        
+        scan_mode = tk.StringVar(value="")
+        
+        def on_folder_scan():
+            scan_mode.set("folder")
+            dialog.destroy()
+        
+        def on_file_scan():
+            scan_mode.set("files")
+            dialog.destroy()
+        
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(pady=20)
+        
+        ttk.Button(button_frame, text="📁 Scan Folder", command=on_folder_scan, width=20).pack(side=tk.LEFT, padx=10)
+        ttk.Button(button_frame, text="🎵 Scan Selected Files", command=on_file_scan, width=20).pack(side=tk.LEFT, padx=10)
+        
+        ttk.Label(dialog, text="Folder: Scan all audio files in a folder\nSelected Files: Choose specific audio files", 
+                 justify=tk.CENTER).pack(pady=10)
+        
+        dialog.wait_window()
+        
+        if not scan_mode.get():
+            return
+        
+        # Get files based on scan mode
+        files_to_scan = []
+        if scan_mode.get() == "folder":
+            directory = filedialog.askdirectory(title="Select folder to analyze audio quality")
+            if not directory:
+                return
+            # Collect all audio files from directory
+            for root, dirs, files in os.walk(directory):
+                for file in files:
+                    if file.lower().endswith(('.mp3', '.flac', '.m4a', '.wav', '.aac', '.ogg', '.wma')):
+                        files_to_scan.append(os.path.join(root, file))
+        else:
+            files = filedialog.askopenfilenames(
+                title="Select audio files to analyze",
+                filetypes=[
+                    ("Audio Files", "*.mp3 *.flac *.m4a *.wav *.aac *.ogg *.wma"),
+                    ("All Files", "*.*")
+                ]
+            )
+            if not files:
+                return
+            files_to_scan = list(files)
+        
+        if not files_to_scan:
+            messagebox.showinfo("No Files", "No audio files found.")
+            return
+        
+        # Start quality check in a separate thread
+        threading.Thread(target=self._quality_check_thread, args=(files_to_scan,), daemon=True).start()
+    
+    def _quality_check_thread(self, files_to_scan):
+        """Thread function to analyze audio quality without blocking the GUI"""
+        try:
+            try:
+                self.start_feedback("Analyzing audio quality")
+            except Exception:
+                pass
+            self.status_var.set(f"Analyzing audio quality for {len(files_to_scan)} files...")
+            self.progress_var.set(0)
+            
+            # Switch to quality check mode columns
+            self.current_mode = 'quality_check'
+            self._setup_quality_check_columns()
+            
+            # Clear the table
+            self.root.after(0, self.tree.delete, *self.tree.get_children())
+            
+            # Analyze each file
+            results = []
+            for i, filepath in enumerate(files_to_scan):
+                # Get basic metadata first (outside try-except)
+                metadata = self._get_file_metadata(filepath)
+                file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
+                metadata_bitrate = self._get_metadata_bitrate(filepath)
+                
+                try:
+                    # Perform spectrum analysis
+                    self.status_var.set(f"Analyzing spectrum: {os.path.basename(filepath)} ({i+1}/{len(files_to_scan)})")
+                    real_bitrate, cutoff_freq = self._analyze_spectrum(filepath)
+                    
+                    # Convert cutoff frequency to kHz
+                    cutoff_freq_khz = f"{cutoff_freq / 1000:.1f}" if cutoff_freq else 'N/A'
+                    
+                    # Determine if there's a mismatch (Fake detection)
+                    is_dismatch = self._check_bitrate_mismatch(metadata_bitrate, real_bitrate)
+                    
+                    results.append({
+                        'filepath': filepath,
+                        'filename': os.path.basename(filepath),
+                        'title': metadata.get('title', ''),
+                        'bitrate_metadata': metadata_bitrate,
+                        'real_bitrate': real_bitrate if real_bitrate else 'Unknown',
+                        'file_size_mb': file_size_mb,
+                        'cutoff_frequency': cutoff_freq_khz,
+                        'is_dismatch': is_dismatch
+                    })
+                    
+                    # Update progress
+                    progress = int((i + 1) / len(files_to_scan) * 100)
+                    self.progress_var.set(progress)
+                    
+                except Exception as e:
+                    print(f"Error analyzing {filepath}: {e}")
+                    results.append({
+                        'filepath': filepath,
+                        'filename': os.path.basename(filepath),
+                        'title': metadata.get('title', ''),
+                        'bitrate_metadata': metadata_bitrate,
+                        'real_bitrate': 'Error',
+                        'file_size_mb': file_size_mb,
+                        'cutoff_frequency': 'Error',
+                        'is_dismatch': ''
+                    })
+                    continue
+            
+            # Display results
+            self.root.after(0, self._display_quality_check_results, results)
+            
+        except Exception as e:
+            self.root.after(0, messagebox.showerror, "Quality Check Error", f"Error during quality check:\n\n{str(e)}")
+        finally:
+            try:
+                self.stop_feedback()
+            except Exception:
+                pass
+            self.progress_var.set(0)
+            self.status_var.set(f"Quality check complete: {len(results)} files analyzed")
+    
+    def _get_metadata_bitrate(self, file_path):
+        """Extract bitrate from file metadata"""
+        try:
+            from mutagen import File as MutagenFile
+            audio_file = MutagenFile(file_path)
+            if audio_file is None:
+                return "N/A"
+            
+            if hasattr(audio_file, 'info') and hasattr(audio_file.info, 'bitrate'):
+                bitrate = audio_file.info.bitrate
+                if bitrate > 10000:
+                    bitrate = bitrate // 1000
+                return f"{bitrate} kbps"
+            
+            if hasattr(audio_file, 'info'):
+                info = audio_file.info
+                if hasattr(info, 'bitrate'):
+                    bitrate = info.bitrate
+                    if bitrate > 10000:
+                        bitrate = bitrate // 1000
+                    return f"{bitrate} kbps"
+                elif file_path.lower().endswith('.flac'):
+                    return "Lossless (FLAC)"
+                elif file_path.lower().endswith('.wav'):
+                    return "Lossless (WAV)"
+            
+            return "N/A"
+        except Exception as e:
+            print(f"Error getting bitrate for {file_path}: {e}")
+            return "N/A"
+    
+    def _check_bitrate_mismatch(self, metadata_bitrate, real_bitrate):
+        """Check if there's a mismatch between metadata and real bitrate.
+        Returns 'Fake' if mismatch detected, empty string otherwise."""
+        if not metadata_bitrate or not real_bitrate or metadata_bitrate == 'N/A' or real_bitrate == 'Unknown':
+            return ''
+        
+        # Extract numeric values from bitrate strings
+        try:
+            # Handle formats like "320 kbps", "~320 kbps", "Lossless (FLAC)", etc.
+            import re
+            
+            # If either is lossless, no mismatch
+            if 'Lossless' in metadata_bitrate or 'Lossless' in real_bitrate:
+                return ''
+            
+            # Extract numbers from metadata bitrate
+            metadata_match = re.search(r'(\d+)', metadata_bitrate)
+            if not metadata_match:
+                return ''
+            metadata_kbps = int(metadata_match.group(1))
+            
+            # Extract numbers from real bitrate
+            real_match = re.search(r'(\d+)', real_bitrate)
+            if not real_match:
+                return ''
+            real_kbps = int(real_match.group(1))
+            
+            # Allow tolerance: if difference is more than 64 kbps, it's suspicious
+            # Example: 320 kbps file detected as 128 kbps or lower = Fake
+            if abs(metadata_kbps - real_kbps) > 64:
+                return 'Fake'
+            
+            return ''
+            
+        except Exception as e:
+            print(f"Error checking bitrate mismatch: {e}")
+            return ''
+    
+    def _analyze_spectrum(self, file_path):
+        """Analyze audio spectrum to detect frequency cutoff.
+        Uses intelligent window sampling to avoid silent sections and breakdowns."""
+        try:
+            import librosa
+            import numpy as np
+            from mutagen import File as MutagenFile
+            
+            # Get total duration without loading entire file
+            audio_file = MutagenFile(file_path)
+            total_duration = audio_file.info.length
+            
+            if total_duration < 10:
+                # Short file - load entirely
+                y, sr = librosa.load(file_path, sr=None)
+                if len(y) < sr * 2:
+                    return None, None
+                
+                n_fft = 4096
+                D = librosa.amplitude_to_db(np.abs(librosa.stft(y, n_fft=n_fft)), ref=np.max)
+                freqs = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
+                avg_spectrum = np.mean(D, axis=1)
+                cutoff_freq = self._detect_frequency_cutoff(freqs, avg_spectrum)
+                estimated_bitrate = self._estimate_bitrate_from_cutoff(cutoff_freq)
+                
+                filesize_bitrate, mb_per_min = self._estimate_bitrate_from_file_size(file_path)
+                if cutoff_freq is None or mb_per_min >= 2.2 or (mb_per_min >= 1.7 and cutoff_freq < 18000) or (mb_per_min >= 1.3 and cutoff_freq < 16000):
+                    estimated_bitrate = filesize_bitrate
+                    if cutoff_freq is None and 'Lossless' in filesize_bitrate:
+                        cutoff_freq = int(22050)  # Assume standard sample rate
+                
+                return estimated_bitrate, cutoff_freq
+            
+            # Configuration for longer files
+            snippet_duration = 8  # seconds per snippet for initial scan
+            num_candidates = 15  # number of positions to sample
+            top_k = 4  # analyze only top K windows in detail
+            
+            # Calculate sampling positions evenly distributed across track
+            candidate_positions = []
+            for i in range(num_candidates):
+                # Distribute evenly, avoiding first/last 5 seconds
+                position = 5 + (i * (total_duration - 10) / (num_candidates - 1)) if num_candidates > 1 else total_duration / 2
+                if position + snippet_duration <= total_duration:
+                    candidate_positions.append(position)
+            
+            # First pass: Quick scan with low resolution to find high-energy windows
+            n_fft_quick = 2048  # Lower resolution for speed
+            candidate_scores = []
+            
+            for offset in candidate_positions:
+                # Load small snippet
+                y_snippet, sr = librosa.load(file_path, sr=None, offset=offset, duration=snippet_duration)
+                
+                # Quick STFT
+                D = np.abs(librosa.stft(y_snippet, n_fft=n_fft_quick))
+                D_db = librosa.amplitude_to_db(D, ref=np.max)
+                
+                # Calculate high-frequency energy (16-22 kHz)
+                freqs = librosa.fft_frequencies(sr=sr, n_fft=n_fft_quick)
+                hf_mask = (freqs >= 16000) & (freqs <= 22000)
+                
+                if np.any(hf_mask):
+                    hf_energy = D_db[hf_mask, :]
+                    hf_score = np.percentile(hf_energy, 90) if hf_energy.size > 0 else -120
+                else:
+                    hf_score = -120
+                
+                candidate_scores.append({
+                    'offset': offset,
+                    'score': hf_score
+                })
+            
+            # Select top K positions
+            candidate_scores.sort(key=lambda x: x['score'], reverse=True)
+            top_positions = [c['offset'] for c in candidate_scores[:top_k]]
+            
+            # Second pass: Detailed analysis on selected windows
+            n_fft = 4096  # Higher resolution
+            cutoffs = []
+            
+            for offset in top_positions:
+                # Load snippet with higher quality
+                y_segment, sr = librosa.load(file_path, sr=None, offset=offset, duration=snippet_duration)
+                
+                # High-resolution spectrum analysis
+                D = librosa.amplitude_to_db(np.abs(librosa.stft(y_segment, n_fft=n_fft)), ref=np.max)
+                freqs = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
+                avg_spectrum = np.mean(D, axis=1)
+                
+                # Detect cutoff
+                cutoff = self._detect_frequency_cutoff(freqs, avg_spectrum)
+                if cutoff:
+                    cutoffs.append(cutoff)
+            
+            # Use lowest cutoff found (most conservative estimate)
+            if cutoffs:
+                cutoff_freq = min(cutoffs)
+            else:
+                cutoff_freq = None
+            
+            # Estimate bitrate from cutoff
+            estimated_bitrate = self._estimate_bitrate_from_cutoff(cutoff_freq)
+            
+            # ALWAYS run file size estimation as verification
+            filesize_bitrate, mb_per_min = self._estimate_bitrate_from_file_size(file_path)
+            
+            # Decision logic: Compare spectrum analysis with file size
+            if cutoff_freq is None:
+                # No cutoff detected - trust file size
+                estimated_bitrate = filesize_bitrate
+                if 'Lossless' in filesize_bitrate:
+                    cutoff_freq = int(sr / 2)  # Nyquist frequency
+            elif mb_per_min >= 2.2:
+                # File size indicates 320 kbps - trust file size over spectrum
+                estimated_bitrate = filesize_bitrate
+            elif mb_per_min >= 1.7 and cutoff_freq < 18000:
+                # File size indicates 256 kbps but spectrum suggests lower - trust file size
+                estimated_bitrate = filesize_bitrate
+            elif mb_per_min >= 1.3 and cutoff_freq < 16000:
+                # File size indicates 192 kbps but spectrum suggests lower - trust file size
+                estimated_bitrate = filesize_bitrate
+            elif 'Lossless' in filesize_bitrate:
+                # Lossless detected by file size
+                estimated_bitrate = filesize_bitrate
+                cutoff_freq = int(sr / 2)
+            # Otherwise, trust the spectrum analysis cutoff detection
+            
+            return estimated_bitrate, cutoff_freq
+            
+        except ImportError:
+            messagebox.showerror("Missing Library", "librosa library is required for spectrum analysis.\n\nInstall with: pip install librosa")
+            return None, None
+        except Exception as e:
+            print(f"Spectrum analysis failed: {str(e)}")
+            return None, None
+    
+    def _detect_frequency_cutoff(self, freqs, spectrum):
+        """Detect frequency cutoff from spectrum - improved detection"""
+        try:
+            import numpy as np
+            
+            # Focus on high frequency range where MP3 cutoffs occur
+            high_freq_start = 10000  # Start from 10kHz
+            high_freq_mask = freqs >= high_freq_start
+            high_freqs = freqs[high_freq_mask]
+            high_spectrum = spectrum[high_freq_mask]
+            
+            if len(high_spectrum) < 10:
+                return None
+            
+            # Method 1: Look for sharp drops (brick wall)
+            spectrum_diff = np.diff(high_spectrum)
+            drop_threshold = -3  # dB drop per frequency bin
+            
+            for i in range(len(spectrum_diff) - 5):
+                if all(spectrum_diff[i:i+5] < drop_threshold):
+                    return int(high_freqs[i])
+            
+            # Method 2: Energy threshold method with rolling average
+            window_size = 5
+            if len(high_spectrum) >= window_size:
+                smoothed = np.convolve(high_spectrum, np.ones(window_size)/window_size, mode='valid')
+                smoothed_freqs = high_freqs[:len(smoothed)]
+                
+                noise_floor = np.percentile(smoothed, 5)
+                energy_threshold = noise_floor + 6
+                
+                above_threshold = smoothed > energy_threshold
+                if np.any(above_threshold):
+                    last_energy_idx = np.where(above_threshold)[0][-1]
+                    
+                    if last_energy_idx < len(smoothed_freqs) - 10:
+                        remaining_energy = smoothed[last_energy_idx+5:]
+                        if len(remaining_energy) > 0 and np.mean(remaining_energy) < energy_threshold:
+                            return int(smoothed_freqs[last_energy_idx])
+            
+            # Method 3: Frequency band energy comparison
+            band_size = 500  # Hz
+            band_energies = []
+            band_centers = []
+            
+            for freq_start in range(10000, 22000, band_size):
+                band_mask = (freqs >= freq_start) & (freqs < freq_start + band_size)
+                if np.any(band_mask):
+                    band_energy = np.mean(spectrum[band_mask])
+                    band_energies.append(band_energy)
+                    band_centers.append(freq_start + band_size/2)
+            
+            if len(band_energies) > 2:
+                band_energies = np.array(band_energies)
+                for i in range(len(band_energies) - 1):
+                    if band_energies[i] - band_energies[i+1] > 10:  # 10dB drop
+                        return int(band_centers[i])
+            
+            # Method 4: Statistical analysis
+            if len(high_spectrum) > 20:
+                mean_energy = np.mean(high_spectrum[:len(high_spectrum)//2])
+                std_energy = np.std(high_spectrum[:len(high_spectrum)//2])
+                low_energy_threshold = mean_energy - 2 * std_energy
+                
+                for i in range(len(high_spectrum) - 10):
+                    if all(high_spectrum[i:i+10] < low_energy_threshold):
+                        return int(high_freqs[i])
+            
+            return None
+            
+        except Exception as e:
+            print(f"Cutoff detection failed: {str(e)}")
+            return None
+    
+    def _estimate_bitrate_from_cutoff(self, cutoff_freq):
+        """Estimate bitrate based on frequency cutoff"""
+        if cutoff_freq is None:
+            return "Unknown"
+        
+        if cutoff_freq >= 20000:
+            return "320 kbps or Lossless"
+        elif cutoff_freq >= 19000:
+            return "~320 kbps"
+        elif cutoff_freq >= 18000:
+            return "~256 kbps"
+        elif cutoff_freq >= 17000:
+            return "~224 kbps"
+        elif cutoff_freq >= 16000:
+            return "~192 kbps"
+        elif cutoff_freq >= 15000:
+            return "~160 kbps"
+        elif cutoff_freq >= 14000:
+            return "~128 kbps"
+        elif cutoff_freq >= 12000:
+            return "~128 kbps (CBR)"
+        elif cutoff_freq >= 11000:
+            return "~112 kbps"
+        elif cutoff_freq >= 10000:
+            return "~96 kbps"
+        else:
+            return "~64 kbps or lower"
+    
+    def _estimate_bitrate_from_file_size(self, file_path):
+        """Estimate bitrate based on file size and duration - SECONDARY CHECK"""
+        try:
+            from mutagen import File as MutagenFile
+            from pathlib import Path
+            
+            file_size = os.path.getsize(file_path)
+            file_size_mb = file_size / (1024 * 1024)
+            audio_file = MutagenFile(file_path)
+            
+            if audio_file and hasattr(audio_file, 'info'):
+                duration = getattr(audio_file.info, 'length', 0)
+                if duration > 0:
+                    duration_minutes = duration / 60
+                    ext = Path(file_path).suffix.lower()
+                    
+                    # Check for lossless formats first
+                    if ext == '.flac':
+                        return "Lossless (FLAC)", file_size_mb / duration_minutes
+                    elif ext == '.wav':
+                        return "Lossless (WAV)", file_size_mb / duration_minutes
+                    elif ext == '.aiff':
+                        return "Lossless (AIFF)", file_size_mb / duration_minutes
+                    
+                    # For lossy formats - estimate based on MB per minute
+                    mb_per_minute = file_size_mb / duration_minutes if duration_minutes > 0 else 0
+                    
+                    # File size based estimation
+                    if mb_per_minute >= 2.2:
+                        return "~320 kbps", mb_per_minute
+                    elif mb_per_minute >= 1.7:
+                        return "~256 kbps", mb_per_minute
+                    elif mb_per_minute >= 1.3:
+                        return "~192 kbps", mb_per_minute
+                    elif mb_per_minute >= 1.0:
+                        return "~160 kbps", mb_per_minute
+                    elif mb_per_minute >= 0.8:
+                        return "~128 kbps", mb_per_minute
+                    elif mb_per_minute >= 0.6:
+                        return "~96 kbps", mb_per_minute
+                    else:
+                        return f"~{int(mb_per_minute * 128)} kbps", mb_per_minute
+            
+            return "Unknown", 0
+            
+        except Exception as e:
+            print(f"File size estimation failed: {str(e)}")
+            return "Unknown", 0
+    
+    def _setup_quality_check_columns(self):
+        """Configure treeview columns for quality check mode"""
+        self.tree['columns'] = ()
+        for col in self.tree.get_children():
+            self.tree.delete(col)
+        
+        columns = ('filepath', 'title', 'bitrate_metadata', 'real_bitrate', 'file_size_mb', 'cutoff_frequency', 'is_dismatch')
+        self.tree['columns'] = columns
+        
+        self.tree.heading('#0', text='')
+        self.tree.column('#0', width=0, stretch=False)
+        
+        self.tree.heading('filepath', text='File Name', command=lambda: self._sort_by_column('filepath'))
+        self.tree.column('filepath', width=500, anchor=tk.W)
+        
+        self.tree.heading('title', text='Title', command=lambda: self._sort_by_column('title'))
+        self.tree.column('title', width=400, anchor=tk.W)
+        
+        self.tree.heading('bitrate_metadata', text='Bit Rate (Original)', command=lambda: self._sort_by_column('bitrate_metadata'))
+        self.tree.column('bitrate_metadata', width=100, anchor=tk.CENTER)
+        
+        self.tree.heading('real_bitrate', text='Real Bitrate', command=lambda: self._sort_by_column('real_bitrate'))
+        self.tree.column('real_bitrate', width=100, anchor=tk.CENTER)
+        
+        self.tree.heading('file_size_mb', text='File Size (MB)', command=lambda: self._sort_by_column('file_size_mb'))
+        self.tree.column('file_size_mb', width=100, anchor=tk.CENTER)
+        
+        self.tree.heading('cutoff_frequency', text='Frequency (kHz)', command=lambda: self._sort_by_column('cutoff_frequency'))
+        self.tree.column('cutoff_frequency', width=100, anchor=tk.CENTER)
+        
+        self.tree.heading('is_dismatch', text='IsDismatch', command=lambda: self._sort_by_column('is_dismatch'))
+        self.tree.column('is_dismatch', width=100, anchor=tk.CENTER)
+    
+    def _sort_by_column(self, col):
+        """Sort treeview contents by the specified column"""
+        # Get all items
+        items = [(self.tree.set(item, col), item) for item in self.tree.get_children('')]
+        
+        # Try to sort numerically if possible, otherwise alphabetically
+        try:
+            # Try numeric sort first
+            items.sort(key=lambda x: float(x[0].replace('~', '').replace(' kbps', '').replace(' MB', '').replace(' kHz', '').replace('Lossless', '99999').replace('Unknown', '-1').replace('N/A', '-1').replace('Error', '-1').replace('Fake', '1').replace(',', '') or -1), reverse=getattr(self, f'_sort_{col}_reverse', False))
+        except (ValueError, AttributeError):
+            # Fall back to string sort
+            items.sort(key=lambda x: x[0].lower(), reverse=getattr(self, f'_sort_{col}_reverse', False))
+        
+        # Rearrange items in sorted positions
+        for index, (val, item) in enumerate(items):
+            self.tree.move(item, '', index)
+        
+        # Toggle sort direction for next time
+        setattr(self, f'_sort_{col}_reverse', not getattr(self, f'_sort_{col}_reverse', False))
+    
+    def _display_quality_check_results(self, results):
+        """Display quality check results in the treeview"""
+        self.tree.delete(*self.tree.get_children())
+        
+        for result in results:
+            values = (
+                result['filepath'],
+                result['title'],
+                result['bitrate_metadata'],
+                result['real_bitrate'],
+                f"{result['file_size_mb']:.2f}",
+                result['cutoff_frequency'],
+                result['is_dismatch']
+            )
+            
+            item_id = self.tree.insert('', tk.END, values=values)
+        
+        messagebox.showinfo(
+            "Quality Check Complete",
+            f"Analysis complete:\n\n"
+            f"Total files analyzed: {len(results)}"
         )
 
     def analyze_collection(self):
