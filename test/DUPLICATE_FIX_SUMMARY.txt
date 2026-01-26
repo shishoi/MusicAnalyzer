@@ -1,0 +1,66 @@
+# Duplicate Detection Algorithm - Fixed (Jan 26, 2026)
+
+## Issues Fixed
+
+### 1. **Title is now the PRIMARY requirement**
+   - Files must have at least **70% title similarity** to be compared
+   - If title similarity < 70%, the pair is immediately skipped
+   - This prevents completely different songs from being grouped together
+
+### 2. **Increased weights and threshold**
+   - Title weight: **2.0x → 3.0x** (more important)
+   - Filename weight: **0.8x → 0.5x** (less important)
+   - Threshold: **0.8 → 1.5** (much stricter)
+
+### 3. **Artist mismatch penalty**
+   - Different artists now add **1.0 penalty**
+   - Prevents songs by different artists from matching
+
+### 4. **Other penalties already in place**
+   - Year mismatch: 0.7 penalty
+   - BPM mismatch (>1 BPM): 0.7 penalty  
+   - Duration difference (>2 sec): 0.5 penalty
+
+## Example: Your Test Case
+
+**Files:**
+- File 1: "בן חן - יאללה תרקדי.mp3" (Artist: בן חן, Title: יאללה תרקדי)
+- File 2: "סטילה  נס - תיק קטן.mp3" (Artist: סטילה & נס, Title: תיק קטן)
+
+**Result:**
+- Title similarity: **33.33%** < 70% minimum
+- **→ IMMEDIATELY SKIPPED** - not compared further
+- ✓ Will NOT be marked as duplicates
+
+## Algorithm Flow
+
+```
+1. Calculate title similarity
+2. IF title_similarity < 70%:
+     SKIP this pair (don't compare)
+   ELSE:
+     Continue with full scoring
+3. Calculate all factors and penalties
+4. Final score = sum(factors) - sum(penalties)
+5. IF score >= 1.5:
+     Mark as duplicate
+   ELSE:
+     Not a duplicate
+```
+
+## Key Parameters
+
+- **MIN_TITLE_SIMILARITY**: 0.70 (70%)
+- **Threshold**: 1.5
+- **Title weight**: 3.0x
+- **Artist match bonus**: 1.5
+- **Artist mismatch penalty**: 1.0
+
+## Result
+
+This should **dramatically reduce**:
+- ✓ False positives (different songs marked as duplicates)
+- ✓ Large duplicate groups
+- ✓ Songs with completely different titles being grouped together
+
+The algorithm now prioritizes title similarity above all else, ensuring that only files with similar titles (same song, different versions/quality) are considered duplicates.

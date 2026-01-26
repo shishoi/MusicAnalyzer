@@ -726,11 +726,14 @@ def find_duplicate_songs(directory, tolerance_sec=3.0, progress_callback=None):
     
     # Find true duplicates in each duration group
     for i, group in enumerate(duration_groups):
-        # Always use full comparison logic - never skip title check
-        # (removed automatic duplicate marking for 2-item groups)
-        
+        # If very small group, use duration only
+        if len(group) == 2:
+            duplicates.append([item['path'] for item in group])
+            continue
+            
+        # For larger groups, use additional factors
         processed_in_group = set()
-
+        
         for j, item1 in enumerate(group):
             if item1['path'] in processed_in_group:
                 continue
@@ -741,26 +744,9 @@ def find_duplicate_songs(directory, tolerance_sec=3.0, progress_callback=None):
             
             for k in range(j+1, len(group)):
                 item2 = group[k]
-
+                
                 if item2['path'] in processed_in_group:
                     continue
-
-                # Skip if either song is shorter than 5 seconds (likely jingles, intros, etc.)
-                if item1['duration'] < 5 or item2['duration'] < 5:
-                    continue
-
-                # Calculate title similarity FIRST - this is the PRIMARY requirement
-                title_sim = 0.0
-                if item1['title'] and item2['title']:
-                    title_sim = filename_similarity(item1['title'], item2['title'])
-                else:
-                    # If no title metadata, use filename similarity
-                    title_sim = filename_similarity(item1['filename'], item2['filename'])
-                
-                # REQUIRE minimum title similarity - skip if titles are too different
-                MIN_TITLE_SIMILARITY = 0.70  # Must have at least 70% title match
-                if title_sim < MIN_TITLE_SIMILARITY:
-                    continue  # Skip this pair - titles are too different
                 
                 # Calculate similarity factors
                 factors = []
@@ -797,12 +783,14 @@ def find_duplicate_songs(directory, tolerance_sec=3.0, progress_callback=None):
                     bitrate_ratio = min(item1['bitrate'], item2['bitrate']) / max(item1['bitrate'], item2['bitrate'])
                     factors.append(bitrate_ratio * 0.5)  # Reduced weight
 
-                # Title similarity (PRIMARY FACTOR - already calculated)
-                factors.append(title_sim * 3.0)  # Very high weight for title (increased from 2.0)
+                # Title similarity (MORE IMPORTANT than filename)
+                if item1['title'] and item2['title']:
+                    title_sim = filename_similarity(item1['title'], item2['title'])
+                    factors.append(title_sim * 2.0)  # Higher weight for title
 
                 # Filename similarity (LESS IMPORTANT)
                 name_sim = filename_similarity(item1['filename'], item2['filename'])
-                factors.append(name_sim * 0.5)  # Reduced weight (was 0.8)
+                factors.append(name_sim * 0.8)  # Lower weight for filename
 
                 # Artist match/mismatch
                 if item1['artist'] and item2['artist']:
@@ -814,8 +802,8 @@ def find_duplicate_songs(directory, tolerance_sec=3.0, progress_callback=None):
                 # Calculate final score with penalties
                 total_score = sum(factors) - sum(penalties)
 
-                # Higher threshold to reduce false positives
-                threshold = 1.5  # Increased from 0.8
+                # Threshold for considering duplicates
+                threshold = 0.8
 
                 if total_score >= threshold:
                     duplicate_group.append(item2['path'])

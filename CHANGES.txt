@@ -1,0 +1,12 @@
+﻿Duplicate Detection Logic Updates - Summary
+
+Changes made to audio_analyzer.py:
+1. Added 'year' and 'bpm' fields to metadata extraction
+2. Added download site words to VERSION_KEYWORDS (youtube, spotidownloader, etc.)
+3. Enhanced similarity calculation with:
+   - Duration penalty: Exact match required (>2 sec difference = major penalty)
+   - Year mismatch penalty: Punishes different years
+   - BPM mismatch penalty: Punishes BPM differences >1
+   - Title similarity: NOW MORE IMPORTANT than filename (2.0x weight)
+   - Filename similarity: Reduced importance (0.8x weight)
+4. Improved normalization: Removes punctuation, version words, download site words

@@ -726,11 +726,14 @@ def find_duplicate_songs(directory, tolerance_sec=3.0, progress_callback=None):
     
     # Find true duplicates in each duration group
     for i, group in enumerate(duration_groups):
-        # Always use full comparison logic - never skip title check
-        # (removed automatic duplicate marking for 2-item groups)
-        
+        # If very small group, use duration only
+        if len(group) == 2:
+            duplicates.append([item['path'] for item in group])
+            continue
+            
+        # For larger groups, use additional factors
         processed_in_group = set()
-
+        
         for j, item1 in enumerate(group):
             if item1['path'] in processed_in_group:
                 continue
@@ -741,86 +744,43 @@ def find_duplicate_songs(directory, tolerance_sec=3.0, progress_callback=None):
             
             for k in range(j+1, len(group)):
                 item2 = group[k]
-
+                
                 if item2['path'] in processed_in_group:
                     continue
-
-                # Skip if either song is shorter than 5 seconds (likely jingles, intros, etc.)
-                if item1['duration'] < 5 or item2['duration'] < 5:
-                    continue
-
-                # Calculate title similarity FIRST - this is the PRIMARY requirement
-                title_sim = 0.0
-                if item1['title'] and item2['title']:
-                    title_sim = filename_similarity(item1['title'], item2['title'])
-                else:
-                    # If no title metadata, use filename similarity
-                    title_sim = filename_similarity(item1['filename'], item2['filename'])
-                
-                # REQUIRE minimum title similarity - skip if titles are too different
-                MIN_TITLE_SIMILARITY = 0.70  # Must have at least 70% title match
-                if title_sim < MIN_TITLE_SIMILARITY:
-                    continue  # Skip this pair - titles are too different
                 
                 # Calculate similarity factors
                 factors = []
-                penalties = []
-
-                # Duration difference penalty (exact match required within 2 sec)
-                duration_diff = abs(item1['duration'] - item2['duration'])
-                if duration_diff <= 1.0:
-                    dur_factor = 1.0
-                elif duration_diff <= 2.0:
-                    dur_factor = 0.7  # Minor penalty
-                else:
-                    penalties.append(0.5)  # Major penalty for > 2 sec difference
-                    dur_factor = 0.3
-                factors.append(dur_factor)
-
-                # Year mismatch penalty
-                if item1['year'] and item2['year']:
-                    if item1['year'] != item2['year']:
-                        penalties.append(0.7)  # Punish year mismatch
-
-                # BPM mismatch penalty
-                if item1['bpm'] and item2['bpm']:
-                    bpm_diff = abs(item1['bpm'] - item2['bpm'])
-                    if bpm_diff > 1.0:  # Allow 1 BPM tolerance
-                        penalties.append(0.7)  # Punish BPM mismatch
-
+                
                 # Similar size factor
                 size_ratio = min(item1['size'], item2['size']) / max(item1['size'], item2['size'])
-                factors.append(size_ratio * 0.5)  # Reduced weight
-
+                factors.append(size_ratio)
+                
                 # Similar bitrate factor
                 if item1['bitrate'] and item2['bitrate']:
                     bitrate_ratio = min(item1['bitrate'], item2['bitrate']) / max(item1['bitrate'], item2['bitrate'])
-                    factors.append(bitrate_ratio * 0.5)  # Reduced weight
-
-                # Title similarity (PRIMARY FACTOR - already calculated)
-                factors.append(title_sim * 3.0)  # Very high weight for title (increased from 2.0)
-
-                # Filename similarity (LESS IMPORTANT)
+                    factors.append(bitrate_ratio)
+                
+                # Filename similarity
                 name_sim = filename_similarity(item1['filename'], item2['filename'])
-                factors.append(name_sim * 0.5)  # Reduced weight (was 0.8)
-
-                # Artist match/mismatch
-                if item1['artist'] and item2['artist']:
-                    if item1['artist'] == item2['artist']:
-                        factors.append(1.5)  # Strong factor for same artist
-                    else:
-                        penalties.append(1.0)  # Penalty for different artists
-
-                # Calculate final score with penalties
-                total_score = sum(factors) - sum(penalties)
-
-                # Higher threshold to reduce false positives
-                threshold = 1.5  # Increased from 0.8
-
-                if total_score >= threshold:
-                    duplicate_group.append(item2['path'])
-                    processed_in_group.add(item2['path'])
-
+                factors.append(name_sim)
+                
+                # Artist/title match
+                if item1['artist'] and item2['artist'] and item1['artist'] == item2['artist']:
+                    factors.append(1.0)  # Strong factor for same artist
+                
+                if item1['title'] and item2['title'] and item1['title'] == item2['title']:
+                    factors.append(1.0)  # Strong factor for same title
+                
+                # Calculate overall similarity
+                if factors:
+                    similarity = sum(factors) / len(factors)
+                    
+                    # Threshold for considering duplicates
+                    threshold = 0.8
+                    
+                    if similarity >= threshold:
+                        duplicate_group.append(item2['path'])
+                        processed_in_group.add(item2['path'])
             
             # If found duplicates
             if len(duplicate_group) > 1:

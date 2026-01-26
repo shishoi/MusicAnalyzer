@@ -227,7 +227,7 @@ class AudioAnalyzerGUI:
         self.analyze_columns = ("filepath", "orig_bpm", "analyzed_bpm", "key", "traktor_key", "intro", "build", "drop", "outro")
         
         # Columns for "Find Duplicates" mode
-        self.duplicates_columns = ("filepath", "title", "artists", "album", "bitrate", "length", "size_mb", "BPM", "year", "has_cover")
+        self.duplicates_columns = ("filepath", "title", "artists", "album", "bitrate", "real_bitrate", "length", "size_mb", "BPM", "year", "has_cover")
         
         # Start with duplicates columns (neutral default)
         columns = self.duplicates_columns
@@ -305,6 +305,7 @@ class AudioAnalyzerGUI:
         self.tree.heading("artists", text="Contributing Artists")
         self.tree.heading("album", text="Album")
         self.tree.heading("bitrate", text="Bit Rate")
+        self.tree.heading("real_bitrate", text="Real Bit Rate")
         self.tree.heading("length", text="Length")
         self.tree.heading("size_mb", text="Size (MB)")
         self.tree.heading("BPM", text="BPM")
@@ -317,6 +318,7 @@ class AudioAnalyzerGUI:
         self.tree.column("artists", width=180)
         self.tree.column("album", width=200)
         self.tree.column("bitrate", width=30)
+        self.tree.column("real_bitrate", width=100)
         self.tree.column("length", width=30)
         self.tree.column("size_mb", width=30)
         self.tree.column("BPM", width=30)
@@ -1111,6 +1113,13 @@ class AudioAnalyzerGUI:
 
                         # Extract metadata for duplicate display
                         meta = self._get_file_metadata(file_path)
+                        
+                        # Get estimated real bitrate using quality check algorithm
+                        try:
+                            real_bitrate, _ = self._analyze_spectrum(file_path)
+                        except Exception as e:
+                            real_bitrate = "Error"
+                            print(f"Error analyzing {file_path}: {e}")
 
                         self.tree.insert(
                             "", 
@@ -1121,6 +1130,7 @@ class AudioAnalyzerGUI:
                                 meta.get('artists') or "",
                                 meta.get('album') or "",
                                 meta.get('bitrate') or "",
+                                real_bitrate or "",
                                 meta.get('length') or "",
                                 meta.get('size_mb') or "",
                                 meta.get('bpm') or "",

@@ -726,11 +726,14 @@ def find_duplicate_songs(directory, tolerance_sec=3.0, progress_callback=None):
     
     # Find true duplicates in each duration group
     for i, group in enumerate(duration_groups):
-        # Always use full comparison logic - never skip title check
-        # (removed automatic duplicate marking for 2-item groups)
-        
+        # If very small group, use duration only
+        if len(group) == 2:
+            duplicates.append([item['path'] for item in group])
+            continue
+            
+        # For larger groups, use additional factors
         processed_in_group = set()
-
+        
         for j, item1 in enumerate(group):
             if item1['path'] in processed_in_group:
                 continue
@@ -741,14 +744,10 @@ def find_duplicate_songs(directory, tolerance_sec=3.0, progress_callback=None):
             
             for k in range(j+1, len(group)):
                 item2 = group[k]
-
+                
                 if item2['path'] in processed_in_group:
                     continue
-
-                # Skip if either song is shorter than 5 seconds (likely jingles, intros, etc.)
-                if item1['duration'] < 5 or item2['duration'] < 5:
-                    continue
-
+                
                 # Calculate title similarity FIRST - this is the PRIMARY requirement
                 title_sim = 0.0
                 if item1['title'] and item2['title']:
