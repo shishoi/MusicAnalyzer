@@ -86,13 +86,12 @@ class AudioAnalyzerGUI:
                 "• Title Match (10%)\n"
                 "Groups ranked by confidence score.")
         
-        # 2. Rename Files (placeholder)
+        # 2. Rename Files
         self.rename_files_button = ttk.Button(
             self.button_frame,
             text="📝 Rename Files",
             command=self.rename_files,
-            width=20,
-            state=tk.DISABLED  # Will enable when rename feature is implemented
+            width=20
         )
         self.rename_files_button.pack(side=tk.LEFT, padx=5)
         ToolTip(self.rename_files_button,
@@ -1279,13 +1278,169 @@ class AudioAnalyzerGUI:
             except Exception:
                 pass
 
+    def _clean_string(self, text):
+        """Remove illegal characters and clean string for filenames and tags"""
+        if not text:
+            return text
+        
+        import re
+        
+        # Remove emoji using Unicode ranges
+        emoji_pattern = re.compile("["
+            u"\U0001F600-\U0001F64F"  # emoticons
+            u"\U0001F300-\U0001F5FF"  # symbols & pictographs
+            u"\U0001F680-\U0001F6FF"  # transport & map symbols
+            u"\U0001F1E0-\U0001F1FF"  # flags (iOS)
+            u"\U00002702-\U000027B0"
+            u"\U000024C2-\U0001F251"
+            u"\U0001F900-\U0001F9FF"  # Supplemental Symbols and Pictographs
+            u"\U0001FA00-\U0001FA6F"  # Chess Symbols
+            u"\U0001FA70-\U0001FAFF"  # Symbols and Pictographs Extended-A
+            u"\U00002600-\U000026FF"  # Miscellaneous Symbols
+            u"\U00002700-\U000027BF"  # Dingbats
+            "]+", flags=re.UNICODE)
+        text = emoji_pattern.sub('', text)
+        
+        # Remove Windows illegal characters: < > : " / \ | ? * '
+        illegal_chars = r'[<>:"/\\|?*\']'
+        text = re.sub(illegal_chars, '', text)
+        
+        # Remove control characters (0x00-0x1F)
+        text = re.sub(r'[\x00-\x1F]', '', text)
+        
+        # Remove invisible/whitespace characters
+        text = text.replace('\u00A0', ' ')  # NBSP (U+00A0)
+        text = text.replace('\u200B', '')   # Zero-width space (U+200B)
+        text = text.replace('\u200C', '')   # Zero-width non-joiner (U+200C)
+        text = text.replace('\u200D', '')   # Zero-width joiner (U+200D)
+        text = text.replace('\uFEFF', '')   # Zero-width no-break space / BOM (U+FEFF)
+        
+        # Remove trailing spaces and dots
+        text = text.rstrip(' .')
+        
+        # Collapse multiple spaces to single space
+        text = re.sub(r'\s+', ' ', text)
+        
+        return text.strip()
+
     def rename_files(self):
-        """Placeholder for rename files feature"""
-        messagebox.showinfo(
-            "Rename Files",
-            "This feature will rename files to remove illegal characters.\n\n"
-            "Coming soon: Remove illegal characters from filenames/titles."
-        )
+        """Rename files to remove illegal characters from filenames and tags"""
+        directory = filedialog.askdirectory(title="Select folder to clean file names and tags")
+        
+        if not directory:
+            return
+        
+        # Start rename process in a separate thread
+        threading.Thread(target=self._rename_files_thread, args=(directory,), daemon=True).start()
+
+    def _rename_files_thread(self, directory):
+        """Thread function to rename files without blocking the GUI"""
+        try:
+            self.start_feedback("Cleaning file names and tags")
+            self.status_var.set(f"Scanning directory: {directory}")
+            self.progress_var.set(0)
+            
+            # Collect all audio files
+            audio_files = []
+            for root, dirs, files in os.walk(directory):
+                for file in files:
+                    if file.lower().endswith(('.mp3', '.flac', '.m4a', '.wav', '.aac', '.ogg', '.wma')):
+                        audio_files.append(os.path.join(root, file))
+            
+            if not audio_files:
+                self.root.after(0, messagebox.showinfo, "No Files", "No audio files found in the selected directory.")
+                self.stop_feedback("No files found")
+                return
+            
+            renamed_count = 0
+            tag_updated_count = 0
+            failed = []
+            
+            for i, filepath in enumerate(audio_files):
+                try:
+                    # Update progress
+                    progress = int((i / len(audio_files)) * 100)
+                    self.progress_var.set(progress)
+                    self.status_var.set(f"Processing {i+1}/{len(audio_files)}: {os.path.basename(filepath)}")
+                    
+                    # Get directory and filename
+                    dir_path = os.path.dirname(filepath)
+                    old_filename = os.path.basename(filepath)
+                    name, ext = os.path.splitext(old_filename)
+                    
+                    # Clean filename
+                    clean_name = self._clean_string(name)
+                    new_filename = clean_name + ext
+                    new_filepath = os.path.join(dir_path, new_filename)
+                    
+                    # Check if filename needs renaming
+                    file_renamed = False
+                    if old_filename != new_filename:
+                        # Check if target filename already exists
+                        if os.path.exists(new_filepath) and new_filepath != filepath:
+                            # Add counter to make unique
+                            counter = 1
+                            while os.path.exists(new_filepath):
+                                new_filename = f"{clean_name}_{counter}{ext}"
+                                new_filepath = os.path.join(dir_path, new_filename)
+                                counter += 1
+                        
+                        try:
+                            os.rename(filepath, new_filepath)
+                            renamed_count += 1
+                            file_renamed = True
+                            filepath = new_filepath  # Update filepath for tag processing
+                        except Exception as e:
+                            failed.append((old_filename, f"Rename failed: {str(e)}"))
+                            continue
+                    
+                    # Update tags (title)
+                    try:
+                        from mutagen import File as MutagenFile
+                        audio = MutagenFile(filepath, easy=True)
+                        if audio is not None:
+                            tag_changed = False
+                            if 'title' in audio and audio['title']:
+                                old_title = audio['title'][0]
+                                clean_title = self._clean_string(old_title)
+                                if old_title != clean_title:
+                                    audio['title'] = clean_title
+                                    tag_changed = True
+                            
+                            if tag_changed:
+                                audio.save()
+                                tag_updated_count += 1
+                    except Exception as e:
+                        # Tag update failed but file might have been renamed
+                        if file_renamed:
+                            failed.append((new_filename, f"Tag update failed: {str(e)}"))
+                        else:
+                            failed.append((old_filename, f"Tag update failed: {str(e)}"))
+                            
+                except Exception as e:
+                    failed.append((os.path.basename(filepath), f"Error: {str(e)}"))
+            
+            # Complete
+            self.progress_var.set(100)
+            self.stop_feedback("Complete")
+            
+            # Show results
+            result_msg = f"File names cleaned: {renamed_count}\nTags updated: {tag_updated_count}\nTotal files processed: {len(audio_files)}"
+            
+            if failed:
+                result_msg += f"\n\nFailed: {len(failed)} files"
+                error_details = "\n".join([f"{name}: {error}" for name, error in failed[:10]])
+                if len(failed) > 10:
+                    error_details += f"\n... and {len(failed) - 10} more"
+                result_msg += f"\n\nErrors:\n{error_details}"
+            
+            self.root.after(0, messagebox.showinfo, "Rename Complete", result_msg)
+            self.status_var.set(f"Rename complete: {renamed_count} files renamed, {tag_updated_count} tags updated")
+            
+        except Exception as e:
+            self.root.after(0, messagebox.showerror, "Rename Error", f"Error during rename process:\n\n{str(e)}")
+            self.stop_feedback("Error")
+            self.status_var.set(f"Error: {str(e)}")
 
     def quality_check(self):
         """Analyze audio quality using spectrum analysis"""
