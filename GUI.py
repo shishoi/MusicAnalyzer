@@ -98,7 +98,7 @@ class AudioAnalyzerGUI:
         # 1. Find Duplicates
         self.find_duplicates_button = ttk.Button(
             self.button_frame, 
-            text="🗐 Find Duplicates", 
+            text="� Find Duplicates", 
             command=self.find_duplicates,
             width=20
         )
@@ -239,6 +239,7 @@ class AudioAnalyzerGUI:
             state=tk.DISABLED
         )
         self.save_button.pack(side=tk.LEFT, padx=5)
+        self.save_button.pack_forget()  # Hidden until analyze mode is active
         ToolTip(self.save_button,
                 "Writes all pending changes to disk:\n"
                 "\n"
@@ -261,7 +262,7 @@ class AudioAnalyzerGUI:
             width=20,
             state=tk.DISABLED
         )
-        self.delete_selected_button.pack(side=tk.LEFT, padx=5)
+        self.delete_selected_button.pack(side=tk.RIGHT, padx=(0, 5))
         ToolTip(self.delete_selected_button,
                 "Moves selected files to the Windows\n"
                 "Recycle Bin.\n"
@@ -281,6 +282,17 @@ class AudioAnalyzerGUI:
             )
             self._theme_toggle_btn.pack(side=tk.RIGHT, padx=5)
             ToolTip(self._theme_toggle_btn, "Switch between Forest Light and Forest Dark theme")
+
+            # Refresh / Stop button
+            self._refresh_btn = ttk.Button(
+                self.button_frame,
+                text="↺",
+                command=self._refresh_and_stop,
+                width=3
+            )
+            self._refresh_btn.pack(side=tk.RIGHT, padx=(0, 2))
+            ToolTip(self._refresh_btn,
+                    "Stop any running process and\nclear the table instantly.\n\nResets status and progress bar.")
 
         # Mode buttons for active-state highlighting
         self._active_mode_btn = None
@@ -322,6 +334,8 @@ class AudioAnalyzerGUI:
         self.create_treeview()
         # Apply custom font/style overrides after theme + widgets are ready
         self._apply_custom_styles()
+        # Init loading GIF overlay
+        self._init_loading_gif()
         # Style title bar + set icon (deferred so HWND is available)
         self.root.after(150, self._style_window)
         self.root.after(250, self._set_window_icon)
@@ -370,6 +384,7 @@ class AudioAnalyzerGUI:
         self.genre_suggestions = {}  # Cache for Last.fm genre results
         self.favorite_folders = {}  # Keyboard shortcut mappings (1-9)
         self.lastfm_popup_open = False  # Track if Last.fm popup is open
+        self._stop_flag = threading.Event()  # Signal running threads to abort
         # Note: folder_tree, paned_window, folder_frame are created above
 
         # Last.fm API setup
@@ -609,7 +624,8 @@ class AudioAnalyzerGUI:
             
             # Create context menu
             context_menu = tk.Menu(self.folder_tree, tearoff=0)
-            context_menu.add_command(label="Open in Explorer", command=self._open_folder_in_explorer)
+            context_menu.add_command(label="📂 Open in Explorer", command=self._open_folder_in_explorer)
+            context_menu.add_command(label="📁 New Folder Here", command=lambda i=item: self._create_folder_in_tree(i))
             
             # Show menu
             try:
@@ -701,49 +717,113 @@ class AudioAnalyzerGUI:
             return
         
         # Move files
+        import shutil
         moved_count = 0
         failed = []
-        
+        items_to_delete = []
+        apply_to_all = None  # None | 'skip' | 'save_both' | 'replace'
+
         for item, src_path in zip(selected, file_paths):
             try:
                 src_path = os.path.normpath(src_path)
                 filename = os.path.basename(src_path)
                 dest_path = os.path.join(self.selected_target_folder, filename)
-                
-                # Check if target already exists
+
+                # Handle conflict
                 if os.path.exists(dest_path):
-                    failed.append((filename, "File already exists in target folder"))
-                    continue
-                
+                    decision = apply_to_all
+                    if decision is None:
+                        result = self._ask_file_conflict(filename, dest_path, len(file_paths) > 1)
+                        if result is None:
+                            continue
+                        decision, remember = result
+                        if remember:
+                            apply_to_all = decision
+
+                    if decision == 'skip':
+                        continue
+                    elif decision == 'save_both':
+                        base, ext = os.path.splitext(filename)
+                        counter = 1
+                        while os.path.exists(dest_path):
+                            dest_path = os.path.join(self.selected_target_folder, f"{base}_{counter}{ext}")
+                            counter += 1
+                    elif decision == 'replace':
+                        os.remove(dest_path)
+
                 # Move file
-                import shutil
                 shutil.move(src_path, dest_path)
-                
+
                 # Update data structures
                 if src_path in self.order_music_files:
                     old_data = self.order_music_files[src_path]
                     del self.order_music_files[src_path]
                     old_data['filepath'] = dest_path
                     self.order_music_files[dest_path] = old_data
-                    
-                    # Update treeview
-                    self.tree.set(item, "filepath", dest_path)
-                
+
+                # Queue for removal from treeview
+                items_to_delete.append(item)
                 moved_count += 1
-                
+
             except Exception as e:
                 failed.append((os.path.basename(src_path), str(e)))
-        
+
+        # Remove moved items from table in one pass
+        for item in items_to_delete:
+            try:
+                self.tree.delete(item)
+            except Exception:
+                pass
+
         # Report results
         if moved_count:
-            messagebox.showinfo("Move Complete", f"Successfully moved {moved_count} file(s).")
-        
+            self.status_var.set(f"Moved {moved_count} file(s) to {os.path.basename(self.selected_target_folder)}")
         if failed:
-            error_msg = "\\n".join([f"{name}: {err}" for name, err in failed[:10]])
+            error_msg = "\n".join([f"{name}: {err}" for name, err in failed[:10]])
             if len(failed) > 10:
-                error_msg += f"\\n... and {len(failed)-10} more"
-            messagebox.showerror("Move Errors", f"Failed to move {len(failed)} file(s):\\n\\n{error_msg}")
+                error_msg += f"\n... and {len(failed)-10} more"
+            messagebox.showerror("Move Errors", f"Failed to move {len(failed)} file(s):\n\n{error_msg}")
     
+    def _ask_file_conflict(self, filename, dest_path, show_apply_all):
+        """Conflict dialog: returns (action, apply_all) or None if dismissed."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("File Already Exists")
+        dialog.geometry("460x230")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - 230
+        y = (dialog.winfo_screenheight() // 2) - 115
+        dialog.geometry(f"+{x}+{y}")
+
+        result = [None]
+        apply_all_var = tk.BooleanVar(value=False)
+
+        ttk.Label(dialog, text=f'"{filename}" already exists at the destination.',
+                  wraplength=430, font=("Segoe UI", 10, "bold")).pack(pady=(18, 4), padx=16, anchor=tk.W)
+        ttk.Label(dialog, text=dest_path, wraplength=430,
+                  font=("Segoe UI", 9)).pack(padx=16, anchor=tk.W)
+
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(pady=14)
+
+        def choose(action):
+            result[0] = (action, apply_all_var.get())
+            dialog.destroy()
+
+        ttk.Button(btn_frame, text="⏭ Skip",      command=lambda: choose('skip'),      width=13).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btn_frame, text="📋 Save Both",  command=lambda: choose('save_both'), width=13).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btn_frame, text="♻ Replace",   command=lambda: choose('replace'),   width=13).pack(side=tk.LEFT, padx=6)
+
+        if show_apply_all:
+            ttk.Checkbutton(dialog, text="Apply this choice to all remaining conflicts",
+                            variable=apply_all_var).pack(pady=(0, 10))
+
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.wait_window()
+        return result[0]
+
     def _show_folder_pane(self):
         """Show the folder pane for Order My Music mode"""
         try:
@@ -1141,18 +1221,21 @@ class AudioAnalyzerGUI:
             # Switch to analyze mode columns (do this in main thread)
             self.root.after(0, lambda: (setattr(self, 'current_mode', 'analyze'), self._setup_analyze_columns(), self._hide_folder_pane()))
             
-            # Clear the table
-            for item in self.tree.get_children():
-                self.tree.delete(item)
-            
+            # Clear the table instantly
+            _ch = self.tree.get_children()
+            if _ch: self.tree.delete(*_ch)
+
             # Clear previous results
             self.analysis_results = {}
             
             for i, file_path in enumerate(file_paths):
+                if self._stop_flag.is_set():
+                    self.status_var.set("Stopped.")
+                    return
                 # Update progress
                 progress = (i / len(file_paths)) * 100
                 self.progress_var.set(progress)
-                
+
                 self.status_var.set(f"Analyzing file {i+1}/{len(file_paths)}: {os.path.basename(file_path)}")
                 
                 # Perform analysis
@@ -1514,6 +1597,10 @@ class AudioAnalyzerGUI:
                         relief="groove", borderwidth=1)
         style.configure("Folder.Treeview", font=('Segoe UI', 11))
         style.configure("TButton", font=("Segoe UI", 11), padding=(10, 5), foreground="white")
+        style.map("TButton",
+                  foreground=[("disabled", "#888888"), ("!disabled", "white")])
+        style.map("Accent.TButton",
+                  foreground=[("disabled", "#aaaaaa"), ("!disabled", "white")])
 
     def _toggle_theme(self):
         """Switch between Forest light and dark themes."""
@@ -1540,6 +1627,69 @@ class AudioAnalyzerGUI:
         except Exception:
             pass
         self._active_mode_btn = active_btn
+        # Save Changes only visible in analyze mode
+        try:
+            if active_btn == self.analyze_button:
+                self.save_button.pack(side=tk.RIGHT, padx=(0, 5))
+                self.save_button.config(state=tk.DISABLED)
+            else:
+                self.save_button.pack_forget()
+        except Exception:
+            pass
+
+    def _refresh_and_stop(self):
+        """Stop any running process and clear the table instantly."""
+        self._stop_flag.set()
+        _ch = self.tree.get_children()
+        if _ch:
+            self.tree.delete(*_ch)
+        self.progress_var.set(0)
+        self.status_var.set("Ready")
+        self._hide_loading()
+        try:
+            if self._feedback_after_id:
+                self.root.after_cancel(self._feedback_after_id)
+            self.feedback_var.set("")
+        except Exception:
+            pass
+        self._set_active_button(None)
+        # Delayed re-clear: catches any inserts that slipped through stop_flag check
+        def _delayed_clear():
+            _ch2 = self.tree.get_children()
+            if _ch2:
+                self.tree.delete(*_ch2)
+        self.root.after(250, _delayed_clear)
+        self.root.after(600, _delayed_clear)  # second pass for slow threads
+        self.root.after(700, self._stop_flag.clear)
+
+    def _create_folder_in_tree(self, parent_item):
+        """Create a new subfolder under the selected folder in the folder tree."""
+        from tkinter import simpledialog
+        values = self.folder_tree.item(parent_item, "values")
+        if not values:
+            return
+        parent_path = values[0]
+        folder_name = simpledialog.askstring(
+            "New Folder",
+            f"Enter name for new folder in:\n{parent_path}",
+            parent=self.root
+        )
+        if not folder_name or not folder_name.strip():
+            return
+        folder_name = folder_name.strip()
+        for ch in r'\/:*?"<>|':
+            folder_name = folder_name.replace(ch, "_")
+        new_path = os.path.join(parent_path, folder_name)
+        try:
+            os.makedirs(new_path, exist_ok=True)
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not create folder:\n{e}")
+            return
+        for child in self.folder_tree.get_children(parent_item):
+            self.folder_tree.delete(child)
+        self._add_folder_children(parent_item, parent_path)
+        self.folder_tree.item(parent_item, open=True)
+        self.status_var.set(f"Created: {new_path}")
 
     def _style_window(self):
         """Style the Windows title bar: dark gray, rounded corners, white text."""
@@ -1644,6 +1794,55 @@ class AudioAnalyzerGUI:
         self.feedback_var.set(self._feedback_base + dots)
         self._feedback_after_id = self.root.after(500, self._feedback_tick)
 
+    def _init_loading_gif(self):
+        """Load GIF frames for the loading overlay."""
+        self._gif_frames = []
+        self._gif_frame_idx = 0
+        self._gif_after_id = None
+        self._gif_label = tk.Label(self.table_frame, bd=0, highlightthickness=0,
+                                   cursor="watch")
+        gif_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "placidplace-loading-15146_512.gif")
+        try:
+            from PIL import Image, ImageTk, ImageSequence
+            img = Image.open(gif_path)
+            size = (110, 110)
+            for frame in ImageSequence.Iterator(img):
+                f = frame.copy().convert("RGBA")
+                f.thumbnail(size)
+                self._gif_frames.append(ImageTk.PhotoImage(f))
+        except Exception:
+            pass  # GIF not available – no animation
+
+    def _show_loading(self):
+        """Show the loading GIF overlay in the center of the table frame."""
+        if not getattr(self, '_gif_frames', None):
+            return
+        self._gif_label.configure(image=self._gif_frames[0])
+        self._gif_label.place(relx=0.5, rely=0.42, anchor=tk.CENTER)
+        self._gif_label.lift()
+        self._gif_frame_idx = 0
+        self._gif_tick()
+
+    def _hide_loading(self):
+        """Hide the loading GIF overlay."""
+        if getattr(self, '_gif_after_id', None):
+            try:
+                self.root.after_cancel(self._gif_after_id)
+            except Exception:
+                pass
+            self._gif_after_id = None
+        if hasattr(self, '_gif_label'):
+            self._gif_label.place_forget()
+
+    def _gif_tick(self):
+        """Advance one GIF animation frame."""
+        if not getattr(self, '_gif_frames', None):
+            return
+        self._gif_frame_idx = (self._gif_frame_idx + 1) % len(self._gif_frames)
+        self._gif_label.configure(image=self._gif_frames[self._gif_frame_idx])
+        self._gif_after_id = self.root.after(50, self._gif_tick)
+
     def start_feedback(self, text):
         """Start animated feedback with base text (e.g. 'Analyzing')."""
         # Stop existing animation
@@ -1656,6 +1855,7 @@ class AudioAnalyzerGUI:
         self._feedback_dots = 0
         self.feedback_var.set(text)
         self._feedback_after_id = self.root.after(500, self._feedback_tick)
+        self.root.after(0, self._show_loading)
 
     def stop_feedback(self, final_text=None, timeout_clear=3000):
         """Stop animation and show final_text (or 'Complete'). Clears after timeout_clear ms if provided."""
@@ -1665,6 +1865,7 @@ class AudioAnalyzerGUI:
         except Exception:
             pass
         self._feedback_after_id = None
+        self._hide_loading()
         msg = final_text or "Complete"
         self.feedback_var.set(msg)
         # Optionally clear after a few seconds
@@ -1796,10 +1997,10 @@ class AudioAnalyzerGUI:
             # Switch to duplicates mode columns (do this in main thread)
             self.root.after(0, lambda: (setattr(self, 'current_mode', 'duplicates'), self._setup_duplicates_columns(), self._hide_folder_pane()))
             
-            # Clear the table
-            for item in self.tree.get_children():
-                self.tree.delete(item)
-            
+            # Clear the table instantly
+            _ch = self.tree.get_children()
+            if _ch: self.tree.delete(*_ch)
+
             # Print initial message to the status
             self.status_var.set("Scanning for duplicates. This may take a while...")
             
@@ -1815,11 +2016,13 @@ class AudioAnalyzerGUI:
                 pass
 
             duplicates = find_duplicate_songs(directory, tolerance_sec, self.progress_var.set)
-            
+
+            if self._stop_flag.is_set():
+                return
             # Clear the table for fresh results
-            for item in self.tree.get_children():
-                self.tree.delete(item)
-            
+            _ch = self.tree.get_children()
+            if _ch: self.tree.delete(*_ch)
+
             # Display only duplicate results
             if duplicates:
                 # Darker color palette (avoid blues that clash with selected row)
@@ -1846,7 +2049,7 @@ class AudioAnalyzerGUI:
                     tag_name = f"group{i}"
                     color = colors[i % len(colors)]
                     # Use slightly darker text color when background is light
-                    self.tree.tag_configure(tag_name, background=color)
+                    self.tree.tag_configure(tag_name, background=color, foreground="#111111")
                     
                     for j, file_path in enumerate(group):
                         filename = os.path.basename(file_path)
@@ -2057,10 +2260,10 @@ class AudioAnalyzerGUI:
             # Switch to order_music mode columns (do this in main thread)
             self.root.after(0, self._switch_to_order_music_mode)
             
-            # Clear the table
-            for item in self.tree.get_children():
-                self.tree.delete(item)
-            
+            # Clear the table instantly
+            _ch = self.tree.get_children()
+            if _ch: self.tree.delete(*_ch)
+
             # Clear previous data
             self.order_music_files = {}
             
@@ -2078,12 +2281,14 @@ class AudioAnalyzerGUI:
             
             # Process each file
             for i, filepath in enumerate(audio_files):
+                if self._stop_flag.is_set():
+                    return
                 try:
                     # Update progress
                     progress = int((i / len(audio_files)) * 100)
                     self.progress_var.set(progress)
                     self.status_var.set(f"Loading {i+1}/{len(audio_files)}: {os.path.basename(filepath)}")
-                    
+
                     # Get metadata
                     meta = self._get_file_metadata(filepath)
                     filename = os.path.basename(filepath)
@@ -2434,7 +2639,7 @@ class AudioAnalyzerGUI:
         y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_reqheight() // 2)
         dialog.geometry(f"+{x}+{y}")
         
-        ttk.Label(dialog, text="Select scan mode:", font=('Arial', 12, 'bold')).pack(pady=20)
+        ttk.Label(dialog, text="Select scan mode:", font=('Segoe UI', 11, 'bold')).pack(pady=20)
         
         scan_mode = tk.StringVar(value="")
         
@@ -2510,6 +2715,9 @@ class AudioAnalyzerGUI:
             # Analyze each file
             results = []
             for i, filepath in enumerate(files_to_scan):
+                if self._stop_flag.is_set():
+                    self.status_var.set("Stopped.")
+                    return
                 # Get basic metadata first (outside try-except)
                 metadata = self._get_file_metadata(filepath)
                 file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
@@ -3041,10 +3249,10 @@ class AudioAnalyzerGUI:
             # Switch to collection mode columns (do this in main thread)
             self.root.after(0, lambda: (setattr(self, 'current_mode', 'collection'), self._setup_collection_columns(), self._hide_folder_pane()))
             
-            # Clear the table
-            for item in self.tree.get_children():
-                self.tree.delete(item)
-            
+            # Clear the table instantly
+            _ch = self.tree.get_children()
+            if _ch: self.tree.delete(*_ch)
+
             self.status_var.set("Parsing collection.nml...")
             
             # Parse collection
@@ -3061,6 +3269,10 @@ class AudioAnalyzerGUI:
             
             # Display tracks in treeview
             for i, track in enumerate(tracks):
+                if self._stop_flag.is_set():
+                    _ch = self.tree.get_children()
+                    if _ch: self.root.after(0, self.tree.delete, *_ch)
+                    return
                 filepath = track.get('filepath', '')
                 # Store track metadata for later use (cover popup, etc.)
                 try:
@@ -3101,7 +3313,11 @@ class AudioAnalyzerGUI:
                 # Update progress
                 self.progress_var.set((i / len(tracks)) * 100)
                 self.root.update_idletasks()
-            
+                if self._stop_flag.is_set():
+                    _ch = self.tree.get_children()
+                    if _ch: self.root.after(0, self.tree.delete, *_ch)
+                    return
+
             self.status_var.set(f"Loaded {len(tracks)} tracks from Traktor collection.")
             self.progress_var.set(100)
             try:
@@ -3636,6 +3852,10 @@ class AudioAnalyzerGUI:
 
         popup = tk.Toplevel(self.root)
         popup.title("Cover Art")
+        popup.transient(self.root)
+        popup.grab_set()
+        popup.update_idletasks()
+        popup.geometry(f"+{popup.winfo_screenwidth() // 2 - 300}+{popup.winfo_screenheight() // 2 - 300}")
 
         try:
             if pil_available:
