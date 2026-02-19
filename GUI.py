@@ -119,7 +119,18 @@ class AudioAnalyzerGUI:
         ToolTip(self.collection_button,
                 "Display and analyze your DJ collection (Traktor/Recordbox/Serato)")
         
-        # 5. Analyze Files
+        # 5. Order My Music
+        self.order_music_button = ttk.Button(
+            self.button_frame,
+            text="📂 Order My Music",
+            command=self.order_my_music,
+            width=20
+        )
+        self.order_music_button.pack(side=tk.LEFT, padx=5)
+        ToolTip(self.order_music_button,
+                "Organize music files: edit tags, move to folders, get genre suggestions")
+        
+        # 6. Analyze Files
         self.analyze_button = ttk.Button(
             self.button_frame, 
             text="🔍 Analyze Files", 
@@ -130,7 +141,7 @@ class AudioAnalyzerGUI:
         ToolTip(self.analyze_button,
                 "Analyze audio files: BPM detection, key analysis, CUE point detection")
         
-        # 6. Save Changes
+        # 7. Save Changes
         self.save_button = ttk.Button(
             self.button_frame, 
             text="💾 Save Changes", 
@@ -142,7 +153,7 @@ class AudioAnalyzerGUI:
         ToolTip(self.save_button, 
                 "Save analysis results:\n- MP3 tags: Title, BPM, Key\n- Traktor CUE points: Intro, Build, Drop, Outro")
         
-        # 7. Delete Selected
+        # 8. Delete Selected
         self.delete_selected_button = ttk.Button(
             self.button_frame,
             text="🗑️ Delete Selected",
@@ -169,9 +180,18 @@ class AudioAnalyzerGUI:
         )
         self.progress_bar.pack(fill=tk.X, pady=5)
 
-        # Create table frame
-        self.table_frame = ttk.Frame(self.main_frame)
-        self.table_frame.pack(fill=tk.BOTH, expand=True, pady=10)
+        # Create table frame with PanedWindow for split view
+        self.paned_window = ttk.PanedWindow(self.main_frame, orient=tk.HORIZONTAL)
+        self.paned_window.pack(fill=tk.BOTH, expand=True, pady=10)
+        
+        # Left pane: table frame for treeview
+        self.table_frame = ttk.Frame(self.paned_window)
+        self.paned_window.add(self.table_frame, weight=3)
+        
+        # Right pane: folder tree frame (initially hidden)
+        self.folder_frame = ttk.Frame(self.paned_window, width=250)
+        self.folder_frame.pack_propagate(False)  # Prevent shrinking to zero
+        # Don't add it yet - will be shown only in order_music mode
         
         # Create treeview (table)
         self.create_treeview()
@@ -213,6 +233,14 @@ class AudioAnalyzerGUI:
         # Store parsed collection tracks and cover image refs
         self.collection_tracks = {}
         self._cover_images = {}
+        
+        # Order My Music mode variables
+        self.order_music_files = {}  # Store file data for order_music mode
+        self.selected_target_folder = None  # Target folder for moving files
+        self.spotify_offset = 0  # Offset for genre suggestions
+        self.genre_suggestions = {}  # Cache for Spotify genre results
+        self.favorite_folders = {}  # Keyboard shortcut mappings (1-9)
+        # Note: folder_tree, paned_window, folder_frame are created above
 
     def create_treeview(self):
         # Scrollbar
@@ -231,13 +259,19 @@ class AudioAnalyzerGUI:
         # Start with duplicates columns (neutral default)
         columns = self.duplicates_columns
         
+        # Configure style for larger font in table
+        style = ttk.Style()
+        style.configure("Table.Treeview", font=('Arial', 11), rowheight=25)
+        style.configure("Table.Treeview.Heading", font=('Arial', 11, 'bold'))
+        
         self.tree = ttk.Treeview(
             self.table_frame,
             columns=columns,
             show="headings",
             selectmode="extended",
             yscrollcommand=scrollbar_y.set,
-            xscrollcommand=scrollbar_x.set
+            xscrollcommand=scrollbar_x.set,
+            style="Table.Treeview"
         )
         
         # Configure scrollbars
@@ -257,6 +291,361 @@ class AudioAnalyzerGUI:
         self.tree.bind("<Delete>", lambda e: self.delete_selected_files())
         # Bind right-click to context menu
         self.tree.bind("<Button-3>", self._on_tree_right_click)
+        # Bind selection change to update Apply button state
+        self.tree.bind("<<TreeviewSelect>>", self._on_tree_selection_change)
+    
+    def create_folder_tree(self):
+        """Create folder tree widget for Order My Music mode"""
+        # Clear existing folder tree if any
+        for widget in self.folder_frame.winfo_children():
+            widget.destroy()
+        
+        # Header label
+        header_label = ttk.Label(self.folder_frame, text="📁 Move files to folder:", font=("Arial", 10, "bold"))
+        header_label.pack(fill=tk.X, padx=5, pady=5)
+        
+        # Apply button frame
+        button_frame = ttk.Frame(self.folder_frame)
+        button_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        self.apply_move_button = ttk.Button(
+            button_frame,
+            text="➡️ Apply (Move Selected Files)",
+            command=self._move_selected_files,
+            state=tk.DISABLED
+        )
+        self.apply_move_button.pack(fill=tk.X)
+        
+        # Expand/Collapse all button (smaller, right-aligned)
+        self.folders_expanded = True  # Track expansion state
+        collapse_frame = ttk.Frame(button_frame)
+        collapse_frame.pack(fill=tk.X, pady=(5, 0))
+        self.expand_collapse_button = ttk.Button(
+            collapse_frame,
+            text="⏪ Collapse All",
+            command=self._toggle_expand_collapse_all,
+            width=15
+        )
+        self.expand_collapse_button.pack(side=tk.RIGHT)
+        
+        # Scrollbar for folder tree
+        tree_scroll = ttk.Scrollbar(self.folder_frame, orient="vertical")
+        tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Create folder tree (Treeview) with larger font
+        style = ttk.Style()
+        style.configure("Folder.Treeview", font=('Arial', 11))
+        self.folder_tree = ttk.Treeview(
+            self.folder_frame,
+            show="tree",
+            selectmode="browse",
+            yscrollcommand=tree_scroll.set,
+            style="Folder.Treeview"
+        )
+        self.folder_tree.pack(fill=tk.BOTH, expand=True, padx=5)
+        tree_scroll.config(command=self.folder_tree.yview)
+        
+        # Bind right-click to show context menu
+        self.folder_tree.bind("<Button-3>", self._on_folder_tree_right_click)
+        # Bind single click to select target folder
+        self.folder_tree.bind("<<TreeviewSelect>>", self._on_folder_tree_select)
+        # Bind tree open event to lazy load children
+        self.folder_tree.bind("<<TreeviewOpen>>", self._on_folder_tree_open)
+        
+        # Populate tree with C:/Users/home/Music directory
+        self._populate_folder_tree()
+    
+    def _toggle_expand_collapse_all(self):
+        """Toggle between expanding and collapsing all folders"""
+        if self.folders_expanded:
+            self._collapse_all_folders()
+            self.expand_collapse_button.config(text="⏩ Expand All")
+            self.folders_expanded = False
+        else:
+            self._expand_all_folders()
+            self.expand_collapse_button.config(text="⏪ Collapse All")
+            self.folders_expanded = True
+    
+    def _expand_all_folders(self):
+        """Recursively expand all folders in the tree"""
+        def expand_children(item):
+            # Load children if not loaded
+            self._expand_folder_node(item)
+            # Recursively expand all children
+            for child in self.folder_tree.get_children(item):
+                expand_children(child)
+        
+        # Expand all root items
+        for item in self.folder_tree.get_children():
+            expand_children(item)
+    
+    def _collapse_all_folders(self):
+        """Recursively collapse all folders in the tree"""
+        def collapse_children(item):
+            # Recursively collapse all children first
+            for child in self.folder_tree.get_children(item):
+                collapse_children(child)
+            # Then collapse this item
+            self.folder_tree.item(item, open=False)
+        
+        # Collapse all root items
+        for item in self.folder_tree.get_children():
+            collapse_children(item)
+    
+    def _populate_folder_tree(self):
+        """Populate folder tree with C:/Users/home/Music directory structure"""
+        if not self.folder_tree:
+            return
+        
+        # Clear existing items
+        for item in self.folder_tree.get_children():
+            self.folder_tree.delete(item)
+        
+        # Root folder (C:/Users/home/Music)
+        root_folder = r"C:\Users\home\Music"
+        
+        # Check if folder exists
+        if not os.path.exists(root_folder):
+            # Try to create it
+            try:
+                os.makedirs(root_folder, exist_ok=True)
+            except Exception:
+                root_folder = "C:/"
+        
+        # Insert root
+        root_id = self.folder_tree.insert("", tk.END, text=root_folder, open=True, values=(root_folder,))
+        
+        # Populate subdirectories
+        self._add_folder_children(root_id, root_folder)
+    
+    def _add_folder_children(self, parent_id, folder_path):
+        """Recursively add subdirectories to folder tree"""
+        try:
+            # Get all subdirectories (not files)
+            items = []
+            for item in os.listdir(folder_path):
+                item_path = os.path.join(folder_path, item)
+                if os.path.isdir(item_path):
+                    items.append((item, item_path))
+            
+            # Sort alphabetically
+            items.sort(key=lambda x: x[0].lower())
+            
+            # Add to tree
+            for item_name, item_path in items:
+                node_id = self.folder_tree.insert(
+                    parent_id,
+                    tk.END,
+                    text=f"📁 {item_name}",
+                    values=(item_path,)
+                )
+                # Check if this folder has subdirectories
+                try:
+                    subdirs = [d for d in os.listdir(item_path) if os.path.isdir(os.path.join(item_path, d))]
+                    if subdirs:
+                        # Add a dummy child to show expand arrow
+                        self.folder_tree.insert(node_id, tk.END, text="Loading...")
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"Error adding folder children: {e}")
+    
+    def _on_folder_tree_right_click(self, event):
+        """Show context menu on right-click"""
+        # Select the item under cursor
+        item = self.folder_tree.identify_row(event.y)
+        if item:
+            self.folder_tree.selection_set(item)
+            
+            # Create context menu
+            context_menu = tk.Menu(self.folder_tree, tearoff=0)
+            context_menu.add_command(label="Open in Explorer", command=self._open_folder_in_explorer)
+            
+            # Show menu
+            try:
+                context_menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                context_menu.grab_release()
+    
+    def _open_folder_in_explorer(self):
+        """Open selected folder in Windows Explorer"""
+        selection = self.folder_tree.selection()
+        if not selection:
+            return
+        
+        item = selection[0]
+        values = self.folder_tree.item(item, "values")
+        if values:
+            folder_path = values[0]
+            if os.path.exists(folder_path):
+                try:
+                    os.startfile(folder_path)
+                except Exception as e:
+                    messagebox.showerror("Error", f"Failed to open folder: {str(e)}")
+    
+    def _on_folder_tree_select(self, event):
+        """Handle folder tree selection - set as target folder for moving files"""
+        selection = self.folder_tree.selection()
+        if not selection:
+            self.selected_target_folder = None
+            self.apply_move_button.config(state=tk.DISABLED)
+            return
+        
+        item = selection[0]
+        values = self.folder_tree.item(item, "values")
+        if values:
+            self.selected_target_folder = values[0]
+            # Enable Apply button if we have both target folder and selected files
+            if self.tree.selection():
+                self.apply_move_button.config(state=tk.NORMAL)
+            else:
+                self.apply_move_button.config(state=tk.DISABLED)
+    
+    def _on_folder_tree_open(self, event):
+        """Handle folder tree expand event - lazy load children"""
+        selection = self.folder_tree.selection()
+        if not selection:
+            return
+        
+        item = selection[0]
+        self._expand_folder_node(item)
+    
+    def _expand_folder_node(self, node_id):
+        """Expand a folder node and load its children if not already loaded"""
+        # Check if children are already loaded (not dummy "Loading..." node)
+        children = self.folder_tree.get_children(node_id)
+        if children and self.folder_tree.item(children[0], "text") == "Loading...":
+            # Remove dummy node
+            self.folder_tree.delete(children[0])
+            
+            # Load actual children
+            values = self.folder_tree.item(node_id, "values")
+            if values:
+                folder_path = values[0]
+                self._add_folder_children(node_id, folder_path)
+        
+        # Open the node
+        self.folder_tree.item(node_id, open=True)
+    
+    def _move_selected_files(self):
+        """Move selected files to the target folder"""
+        if not self.selected_target_folder:
+            messagebox.showwarning("No Target", "Please select a target folder first.")
+            return
+        
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showinfo("No Files", "No files selected to move.")
+            return
+        
+        # Get file paths
+        file_paths = [self.tree.set(item, "filepath") for item in selected]
+        
+        # Confirm move
+        confirm = messagebox.askyesno(
+            "Confirm Move",
+            f"Move {len(file_paths)} file(s) to:\n{self.selected_target_folder}\n\nContinue?"
+        )
+        
+        if not confirm:
+            return
+        
+        # Move files
+        moved_count = 0
+        failed = []
+        
+        for item, src_path in zip(selected, file_paths):
+            try:
+                src_path = os.path.normpath(src_path)
+                filename = os.path.basename(src_path)
+                dest_path = os.path.join(self.selected_target_folder, filename)
+                
+                # Check if target already exists
+                if os.path.exists(dest_path):
+                    failed.append((filename, "File already exists in target folder"))
+                    continue
+                
+                # Move file
+                import shutil
+                shutil.move(src_path, dest_path)
+                
+                # Update data structures
+                if src_path in self.order_music_files:
+                    old_data = self.order_music_files[src_path]
+                    del self.order_music_files[src_path]
+                    old_data['filepath'] = dest_path
+                    self.order_music_files[dest_path] = old_data
+                    
+                    # Update treeview
+                    self.tree.set(item, "filepath", dest_path)
+                
+                moved_count += 1
+                
+            except Exception as e:
+                failed.append((os.path.basename(src_path), str(e)))
+        
+        # Report results
+        if moved_count:
+            messagebox.showinfo("Move Complete", f"Successfully moved {moved_count} file(s).")
+        
+        if failed:
+            error_msg = "\\n".join([f"{name}: {err}" for name, err in failed[:10]])
+            if len(failed) > 10:
+                error_msg += f"\\n... and {len(failed)-10} more"
+            messagebox.showerror("Move Errors", f"Failed to move {len(failed)} file(s):\\n\\n{error_msg}")
+    
+    def _show_folder_pane(self):
+        """Show the folder pane for Order My Music mode"""
+        try:
+            # Check if folder frame is already added to paned window
+            # panes() returns widget path names as strings, so we need to convert
+            if str(self.folder_frame) not in self.paned_window.panes():
+                self.paned_window.add(self.folder_frame, weight=1)
+            
+            # Create/refresh folder tree BEFORE layout update
+            self.create_folder_tree()
+            
+            # Force layout update
+            self.paned_window.update_idletasks()
+            self.root.update_idletasks()
+            
+            # Explicitly set sash position to give folder pane 250px width
+            try:
+                total_width = self.paned_window.winfo_width()
+                if total_width > 300:
+                    sash_pos = total_width - 280  # Leave 280px for folder pane
+                    self.paned_window.sashpos(0, sash_pos)
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"Error showing folder pane: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _hide_folder_pane(self):
+        """Hide the folder pane for non-Order My Music modes"""
+        try:
+            # Remove folder frame from paned window if present
+            # panes() returns widget path names as strings, so we need to convert
+            if str(self.folder_frame) in self.paned_window.panes():
+                self.paned_window.remove(self.folder_frame)
+        except Exception as e:
+            print(f"Error hiding folder pane: {e}")
+    
+    def _on_tree_selection_change(self, event):
+        """Update Apply button state when file selection changes"""
+        if self.current_mode == 'order_music' and hasattr(self, 'apply_move_button'):
+            # Enable Apply button only if both target folder and files are selected
+            if self.selected_target_folder and self.tree.selection():
+                try:
+                    self.apply_move_button.config(state=tk.NORMAL)
+                except Exception:
+                    pass
+            else:
+                try:
+                    self.apply_move_button.config(state=tk.DISABLED)
+                except Exception:
+                    pass
     
     def _setup_analyze_columns(self):
         """Set up columns for Analyze Files mode."""
@@ -395,6 +784,53 @@ class AudioAnalyzerGUI:
         self.sort_column = None
         self.sort_reverse = False
     
+    def _setup_order_music_columns(self):
+        """Set up columns for Order My Music mode."""
+        # Remove existing columns
+        for col in self.tree["columns"]:
+            self.tree.column(col, width=0, stretch=tk.NO)
+        
+        # Order My Music columns
+        self.order_music_columns = (
+            "filepath", "filename", "title", "artist", "album", "year", 
+            "genre", "comment", "length", "type", "size_mb", "bitrate", "rating", "bpm"
+        )
+        
+        # Reconfigure with order_music columns
+        self.tree.configure(columns=self.order_music_columns)
+        
+        # Define headings
+        self.tree.heading("filepath", text="File Path")
+        self.tree.heading("filename", text="File Name")
+        self.tree.heading("title", text="Title")
+        self.tree.heading("artist", text="Artist")
+        self.tree.heading("album", text="Album")
+        self.tree.heading("year", text="Year")
+        self.tree.heading("genre", text="Genre")
+        self.tree.heading("comment", text="Comment")
+        self.tree.heading("length", text="Length")
+        self.tree.heading("type", text="Type")
+        self.tree.heading("size_mb", text="Size (MB)")
+        self.tree.heading("bitrate", text="Bitrate")
+        self.tree.heading("rating", text="Rating")
+        self.tree.heading("bpm", text="BPM")
+        
+        # Define columns width
+        self.tree.column("filepath", width=0, stretch=tk.NO)  # Hidden but needed for reference
+        self.tree.column("filename", width=200)
+        self.tree.column("title", width=200)
+        self.tree.column("artist", width=150)
+        self.tree.column("album", width=150)
+        self.tree.column("year", width=50)
+        self.tree.column("genre", width=120)
+        self.tree.column("comment", width=200)
+        self.tree.column("length", width=60)
+        self.tree.column("type", width=50)
+        self.tree.column("size_mb", width=70)
+        self.tree.column("bitrate", width=80)
+        self.tree.column("rating", width=60)
+        self.tree.column("bpm", width=50)
+    
     def on_cell_double_click(self, event):
         """Handle double-click on a cell to edit the value"""
         # Get the item and column that was clicked
@@ -424,6 +860,12 @@ class AudioAnalyzerGUI:
             else:
                 messagebox.showinfo("Cover Art", "No cover art available for this track.")
             return
+        
+        # In order_music mode, prevent editing read-only columns
+        if self.current_mode == 'order_music':
+            readonly_columns = ['length', 'type', 'size_mb', 'bitrate', 'filepath']
+            if column_name in readonly_columns:
+                return  # Don't allow editing these columns
         
         # Get current value
         current_value = self.tree.set(item, column_name)
@@ -463,6 +905,44 @@ class AudioAnalyzerGUI:
                 else:
                     # Update other fields directly
                     self.analysis_results[file_path][column_name] = entry.get()
+            
+            # In order_music mode, save changes to file tags immediately
+            if self.current_mode == 'order_music' and file_path in self.order_music_files:
+                # Special handling for filename - rename the actual file
+                if column_name == 'filename':
+                    new_filename = entry.get()
+                    if new_filename and new_filename != self.order_music_files[file_path]['filename']:
+                        try:
+                            dir_path = os.path.dirname(file_path)
+                            _, ext = os.path.splitext(file_path)
+                            new_filepath = os.path.join(dir_path, new_filename if new_filename.endswith(ext) else new_filename + ext)
+                            
+                            # Check if target file already exists
+                            if os.path.exists(new_filepath):
+                                messagebox.showerror("Rename Error", f"File already exists: {new_filename}")
+                                entry.destroy()
+                                return
+                            
+                            # Rename the file
+                            os.rename(file_path, new_filepath)
+                            
+                            # Update all references
+                            old_data = self.order_music_files[file_path]
+                            del self.order_music_files[file_path]
+                            old_data['filepath'] = new_filepath
+                            old_data['filename'] = os.path.basename(new_filepath)
+                            self.order_music_files[new_filepath] = old_data
+                            
+                            # Update treeview filepath column (hidden)
+                            self.tree.set(item, 'filepath', new_filepath)
+                            self.tree.set(item, 'filename', os.path.basename(new_filepath))
+                            
+                        except Exception as e:
+                            messagebox.showerror("Rename Error", f"Failed to rename file: {str(e)}")
+                else:
+                    # For other tags, save to file
+                    self._save_order_music_tag(file_path, column_name, entry.get())
+                    self.order_music_files[file_path][column_name] = entry.get()
             
             # Destroy the entry widget
             entry.destroy()
@@ -505,9 +985,8 @@ class AudioAnalyzerGUI:
             self.status_var.set("Analyzing files...")
             self.progress_var.set(0)
             
-            # Switch to analyze mode columns
-            self.current_mode = 'analyze'
-            self._setup_analyze_columns()
+            # Switch to analyze mode columns (do this in main thread)
+            self.root.after(0, lambda: (setattr(self, 'current_mode', 'analyze'), self._setup_analyze_columns(), self._hide_folder_pane()))
             
             # Clear the table
             for item in self.tree.get_children():
@@ -704,7 +1183,7 @@ class AudioAnalyzerGUI:
 
 
     def _get_file_metadata(self, file_path):
-        """Return metadata for a file: title, bitrate (e.g. '320 kbps'), length (mm:ss), size_mb (string), artists, album, bpm, year, has_cover."""
+        """Return metadata for a file: title, bitrate (e.g. '320 kbps'), length (mm:ss), size_mb (string), artists, album, bpm, year, genre, comment, has_cover."""
         meta = {
             'title': None,
             'bitrate': None,
@@ -714,6 +1193,8 @@ class AudioAnalyzerGUI:
             'album': None,
             'bpm': None,
             'year': None,
+            'genre': None,
+            'comment': None,
             'has_cover': 0
         }
 
@@ -770,6 +1251,26 @@ class AudioAnalyzerGUI:
                     except Exception:
                         year = None
                 meta['year'] = year
+
+                # Genre
+                genre = None
+                if 'genre' in audio:
+                    try:
+                        genre_list = audio.get('genre')
+                        genre = ", ".join(genre_list) if isinstance(genre_list, list) else str(genre_list[0])
+                    except Exception:
+                        genre = None
+                meta['genre'] = genre
+
+                # Comment
+                comment = None
+                if 'comment' in audio:
+                    try:
+                        comment_list = audio.get('comment')
+                        comment = comment_list[0] if comment_list else None
+                    except Exception:
+                        comment = None
+                meta['comment'] = comment
 
             # Length and bitrate from info (non-easy Mutagen)
             if info is not None and hasattr(info, 'info') and info.info is not None:
@@ -1051,9 +1552,8 @@ class AudioAnalyzerGUI:
             self.status_var.set(f"Scanning directory for duplicates: {directory}")
             self.progress_var.set(0)
             
-            # Switch to duplicates mode columns
-            self.current_mode = 'duplicates'
-            self._setup_duplicates_columns()
+            # Switch to duplicates mode columns (do this in main thread)
+            self.root.after(0, lambda: (setattr(self, 'current_mode', 'duplicates'), self._setup_duplicates_columns(), self._hide_folder_pane()))
             
             # Clear the table
             for item in self.tree.get_children():
@@ -1247,6 +1747,9 @@ class AudioAnalyzerGUI:
                         deleted.append(path)
                         try:
                             self.tree.delete(item)
+                            # Also remove from order_music_files if in that mode
+                            if self.current_mode == 'order_music' and path in self.order_music_files:
+                                del self.order_music_files[path]
                         except Exception:
                             pass
                     except Exception as e:
@@ -1255,6 +1758,9 @@ class AudioAnalyzerGUI:
                     failed.append((path, "File not found or is not a file"))
                     try:
                         self.tree.delete(item)
+                        # Also remove from order_music_files if in that mode
+                        if self.current_mode == 'order_music' and path in self.order_music_files:
+                            del self.order_music_files[path]
                     except Exception:
                         pass
             except Exception as e:
@@ -1277,6 +1783,232 @@ class AudioAnalyzerGUI:
                 self.delete_selected_button.config(state=tk.DISABLED)
             except Exception:
                 pass
+
+    def order_my_music(self):
+        """Organize music files - edit tags, move to folders, get genre suggestions"""
+        directory = filedialog.askdirectory(title="Select folder with music files to organize")
+        
+        if not directory:
+            return
+        
+        # Start order music process in a separate thread
+        threading.Thread(target=self._order_music_thread, args=(directory,), daemon=True).start()
+    
+    def _switch_to_order_music_mode(self):
+        """Switch UI to order_music mode (must run in main thread)"""
+        self.current_mode = 'order_music'
+        self._setup_order_music_columns()
+        self._show_folder_pane()
+        # Delete button will be enabled after files are loaded
+        try:
+            self.delete_selected_button.config(state=tk.DISABLED)
+        except Exception:
+            pass
+    
+    def _order_music_thread(self, directory):
+        """Thread function to scan and display music files for organization"""
+        try:
+            self.start_feedback("Loading music files")
+            self.status_var.set(f"Scanning directory: {directory}")
+            self.progress_var.set(0)
+            
+            # Switch to order_music mode columns (do this in main thread)
+            self.root.after(0, self._switch_to_order_music_mode)
+            
+            # Clear the table
+            for item in self.tree.get_children():
+                self.tree.delete(item)
+            
+            # Clear previous data
+            self.order_music_files = {}
+            
+            # Collect all audio files
+            audio_files = []
+            for root, dirs, files in os.walk(directory):
+                for file in files:
+                    if file.lower().endswith(('.mp3', '.flac', '.m4a', '.wav', '.aac', '.ogg', '.wma')):
+                        audio_files.append(os.path.join(root, file))
+            
+            if not audio_files:
+                self.root.after(0, messagebox.showinfo, "No Files", "No audio files found in the selected directory.")
+                self.stop_feedback("No files found")
+                return
+            
+            # Process each file
+            for i, filepath in enumerate(audio_files):
+                try:
+                    # Update progress
+                    progress = int((i / len(audio_files)) * 100)
+                    self.progress_var.set(progress)
+                    self.status_var.set(f"Loading {i+1}/{len(audio_files)}: {os.path.basename(filepath)}")
+                    
+                    # Get metadata
+                    meta = self._get_file_metadata(filepath)
+                    filename = os.path.basename(filepath)
+                    
+                    # Get file extension (type)
+                    file_ext = os.path.splitext(filename)[1][1:].upper()  # Remove dot and uppercase
+                    
+                    # Get rating (0-5 stars)
+                    rating = self._get_rating(filepath)
+                    
+                    # Store file data
+                    self.order_music_files[filepath] = {
+                        'filepath': filepath,
+                        'filename': filename,
+                        'title': meta.get('title', ''),
+                        'artist': meta.get('artists', ''),
+                        'album': meta.get('album', ''),
+                        'year': meta.get('year', ''),
+                        'genre': meta.get('genre', ''),
+                        'comment': meta.get('comment', ''),
+                        'length': meta.get('length', ''),
+                        'type': file_ext,
+                        'size_mb': meta.get('size_mb', ''),
+                        'bitrate': meta.get('bitrate', ''),
+                        'rating': rating,
+                        'bpm': meta.get('bpm', '')
+                    }
+                    
+                    # Add to table
+                    self.tree.insert(
+                        "",
+                        tk.END,
+                        values=(
+                            filepath,  # Hidden column
+                            filename,
+                            meta.get('title', ''),
+                            meta.get('artists', ''),
+                            meta.get('album', ''),
+                            meta.get('year', ''),
+                            meta.get('genre', ''),
+                            meta.get('comment', ''),
+                            meta.get('length', ''),
+                            file_ext,
+                            meta.get('size_mb', ''),
+                            meta.get('bitrate', ''),
+                            rating,
+                            meta.get('bpm', '')
+                        )
+                    )
+                    
+                except Exception as e:
+                    print(f"Error processing {filepath}: {e}")
+                    continue
+            
+            # Enable delete button now that files are loaded
+            try:
+                self.delete_selected_button.config(state=tk.NORMAL)
+            except Exception:
+                pass
+            
+            # Complete
+            self.progress_var.set(100)
+            self.stop_feedback("Complete")
+            self.status_var.set(f"Loaded {len(audio_files)} music files ready to organize")
+            
+        except Exception as e:
+            self.root.after(0, messagebox.showerror, "Order Music Error", f"Error loading music files:\\n\\n{str(e)}")
+            self.stop_feedback("Error")
+            self.status_var.set(f"Error: {str(e)}")
+    
+    def _get_rating(self, file_path):
+        """Extract rating from file (0-5 stars)"""
+        try:
+            from mutagen import File as MutagenFile
+            from mutagen.id3 import POPM
+            
+            audio = MutagenFile(file_path)
+            if audio is None:
+                return "0"
+            
+            # Try to get rating from different tag formats
+            rating_val = 0
+            
+            # MP3 - POPM (Popularimeter) frame
+            if hasattr(audio, 'tags') and audio.tags:
+                if 'POPM:Windows Media Player 9 Series' in audio.tags:
+                    popm = audio.tags['POPM:Windows Media Player 9 Series']
+                    rating_val = popm.rating
+                elif 'POPM:no@email' in audio.tags:
+                    popm = audio.tags['POPM:no@email']
+                    rating_val = popm.rating
+            
+            # Convert POPM rating (0-255) to stars (0-5)
+            # WMP scale: 0=0, 1=1, 64=2, 128=3, 196=4, 255=5
+            if rating_val == 0:
+                return "0"
+            elif rating_val < 32:
+                return "1"
+            elif rating_val < 96:
+                return "2"
+            elif rating_val < 160:
+                return "3"
+            elif rating_val < 224:
+                return "4"
+            else:
+                return "5"
+                
+        except Exception:
+            return "0"
+    
+    def _save_order_music_tag(self, file_path, tag_name, value):
+        """Save a single tag change to the audio file"""
+        try:
+            from mutagen import File as MutagenFile
+            from mutagen.id3 import ID3, TIT2, TPE1, TALB, TDRC, TBPM, TCON, COMM, POPM
+            
+            # Map column names to ID3 frames
+            if file_path.lower().endswith('.mp3'):
+                audio = ID3(file_path)
+                
+                if tag_name == 'title':
+                    audio["TIT2"] = TIT2(encoding=3, text=value)
+                elif tag_name == 'artist':
+                    audio["TPE1"] = TPE1(encoding=3, text=value)
+                elif tag_name == 'album':
+                    audio["TALB"] = TALB(encoding=3, text=value)
+                elif tag_name == 'year':
+                    audio["TDRC"] = TDRC(encoding=3, text=value)
+                elif tag_name == 'bpm':
+                    audio["TBPM"] = TBPM(encoding=3, text=value)
+                elif tag_name == 'genre':
+                    audio["TCON"] = TCON(encoding=3, text=value)
+                elif tag_name == 'comment':
+                    audio["COMM"] = COMM(encoding=3, lang='eng', desc='', text=value)
+                elif tag_name == 'rating':
+                    # Convert stars (0-5) to POPM rating (0-255)
+                    try:
+                        stars = int(value)
+                        rating_map = {0: 0, 1: 1, 2: 64, 3: 128, 4: 196, 5: 255}
+                        popm_value = rating_map.get(stars, 0)
+                        audio["POPM:Windows Media Player 9 Series"] = POPM(email="Windows Media Player 9 Series", rating=popm_value, count=0)
+                    except ValueError:
+                        pass
+                
+                audio.save()
+            else:
+                # For other formats, use easy mode (FLAC, OGG, M4A, etc.)
+                audio = MutagenFile(file_path, easy=True)
+                if audio is None:
+                    return
+                
+                tag_map = {
+                    'title': 'title',
+                    'artist': 'artist',
+                    'album': 'album',
+                    'year': 'date',
+                    'bpm': 'bpm',
+                    'genre': 'genre',
+                    'comment': 'comment'
+                }
+                
+                if tag_name in tag_map:
+                    audio[tag_map[tag_name]] = value
+                    audio.save()
+                    
+        except Exception as e:
+            print(f"Error saving tag {tag_name} to {file_path}: {e}")
 
     def _clean_string(self, text):
         """Remove illegal characters and clean string for filenames and tags"""
@@ -1523,9 +2255,8 @@ class AudioAnalyzerGUI:
             self.status_var.set(f"Analyzing audio quality for {len(files_to_scan)} files...")
             self.progress_var.set(0)
             
-            # Switch to quality check mode columns
-            self.current_mode = 'quality_check'
-            self._setup_quality_check_columns()
+            # Switch to quality check mode columns (do this in main thread)
+            self.root.after(0, lambda: (setattr(self, 'current_mode', 'quality_check'), self._setup_quality_check_columns(), self._hide_folder_pane()))
             
             # Clear the table
             self.root.after(0, self.tree.delete, *self.tree.get_children())
@@ -2060,9 +2791,8 @@ class AudioAnalyzerGUI:
             self.status_var.set(f"Loading Traktor collection from: {collection_path}")
             self.progress_var.set(0)
             
-            # Switch to collection mode columns
-            self.current_mode = 'collection'
-            self._setup_collection_columns()
+            # Switch to collection mode columns (do this in main thread)
+            self.root.after(0, lambda: (setattr(self, 'current_mode', 'collection'), self._setup_collection_columns(), self._hide_folder_pane()))
             
             # Clear the table
             for item in self.tree.get_children():
