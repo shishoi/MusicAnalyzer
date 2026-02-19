@@ -17,6 +17,12 @@ except ImportError:
     pylast = None
     _pylast_available = False
 
+# Forest theme .tcl paths (bundled in project folder)
+_THEME_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)))
+_FOREST_LIGHT_TCL = os.path.join(_THEME_DIR, "forest-light.tcl")
+_FOREST_DARK_TCL  = os.path.join(_THEME_DIR, "forest-dark.tcl")
+_forest_theme_available = os.path.isfile(_FOREST_LIGHT_TCL) and os.path.isfile(_FOREST_DARK_TCL)
+
 # Import required modules
 from audio_analyzer import AudioAnalyzer, TraktorNMLEditor, find_duplicate_songs, load_collection_path, save_collection_path, parse_traktor_collection
 
@@ -49,8 +55,10 @@ class ToolTip:
         self.tipwindow = tw = tk.Toplevel(self.widget)
         tw.wm_overrideredirect(True)
         tw.wm_geometry(f"+{x}+{y}")
-        label = tk.Label(tw, text=self.text, background="#ffffe0", relief=tk.SOLID, borderwidth=1, font=("tahoma", 9, "normal"))
-        label.pack(ipadx=1)
+        label = tk.Label(tw, text=self.text, background="#1e1e1e", foreground="#f0f0f0",
+                          relief=tk.SOLID, borderwidth=1, font=("Segoe UI", 9, "normal"),
+                          justify=tk.LEFT, anchor=tk.W, wraplength=320)
+        label.pack(ipadx=6, ipady=4)
 
     def hidetip(self, event=None):
         """Hide the tooltip."""
@@ -63,8 +71,15 @@ class AudioAnalyzerGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Audio Analyzer")
-        self.root.geometry("1000x700")  # Larger window for the table
-        
+        self.root.geometry("1200x750")
+
+        # Load and apply Forest theme (default: dark)
+        self._current_theme = "forest-dark"
+        if _forest_theme_available:
+            root.tk.call("source", _FOREST_LIGHT_TCL)
+            root.tk.call("source", _FOREST_DARK_TCL)
+            ttk.Style().theme_use("forest-dark")
+
         # Dictionary to store analysis results
         self.analysis_results = {}
         
@@ -88,15 +103,19 @@ class AudioAnalyzerGUI:
             width=20
         )
         self.find_duplicates_button.pack(side=tk.LEFT, padx=5)
-        ToolTip(self.find_duplicates_button, 
-                "Detect duplicate audio files using intelligent scoring:\n"
-                "• Filename Similarity (50%)\n"
-                "• Album Match (15%)\n"
-                "• Artist Match (15%)\n"
-                "• File Size (10%)\n"
-                "• Duration (10%)\n"
-                "• Title Match (10%)\n"
-                "Groups ranked by confidence score.")
+        ToolTip(self.find_duplicates_button,
+                "Scans a folder for duplicate audio files\n"
+                "using a multi-factor scoring algorithm:\n"
+                "\n"
+                "  Filename Similarity  50%\n"
+                "  Artist Match         15%\n"
+                "  Album Match          15%\n"
+                "  File Duration        10%\n"
+                "  File Size            10%\n"
+                "\n"
+                "Results are grouped by duplicate set and\n"
+                "ranked by confidence score (highest first).\n"
+                "Supports: MP3, FLAC, WAV, M4A, AAC.")
         
         # 2. Rename Files
         self.rename_files_button = ttk.Button(
@@ -107,7 +126,16 @@ class AudioAnalyzerGUI:
         )
         self.rename_files_button.pack(side=tk.LEFT, padx=5)
         ToolTip(self.rename_files_button,
-                "Remove illegal characters from filenames/titles to prevent software crashes")
+                "Cleans filenames and embedded title tags\n"
+                "by removing characters that cause crashes\n"
+                "in DJ software (Serato, Traktor, Rekordbox).\n"
+                "\n"
+                "Illegal characters removed:\n"
+                "  / \\ : * ? \" < > |\n"
+                "\n"
+                "Both the filename on disk and the\n"
+                "ID3 / FLAC / M4A title tag are cleaned\n"
+                "in one step.")
 
         # 3. Quality Check
         self.quality_check_button = ttk.Button(
@@ -118,7 +146,21 @@ class AudioAnalyzerGUI:
         )
         self.quality_check_button.pack(side=tk.LEFT, padx=5)
         ToolTip(self.quality_check_button,
-                "Check audio quality: bitrate, sample rate, format, missing metadata")
+                "Scans audio files and flags quality issues:\n"
+                "\n"
+                "  • Reported Bitrate\n"
+                "    As stored in the file header tag\n"
+                "  • Real Bitrate (estimated)\n"
+                "    Detects fake/upscaled MP3s re-encoded\n"
+                "    from low-quality sources\n"
+                "  • Sample Rate\n"
+                "    Flags non-standard rates\n"
+                "  • Missing Metadata\n"
+                "    Title, artist, BPM, genre, cover art\n"
+                "  • File Format\n"
+                "    MP3, FLAC, WAV, M4A, AAC\n"
+                "\n"
+                "Supports batch scanning of full folders.")
 
         # 4. My Collection
         self.collection_button = ttk.Button(
@@ -129,7 +171,17 @@ class AudioAnalyzerGUI:
         )
         self.collection_button.pack(side=tk.LEFT, padx=5)
         ToolTip(self.collection_button,
-                "Display and analyze your DJ collection (Traktor/Recordbox/Serato)")
+                "Imports and displays your full DJ library:\n"
+                "\n"
+                "  • Traktor   — collection.nml\n"
+                "  • Rekordbox — XML export file\n"
+                "  • Serato    — _Serato_ crate folder\n"
+                "\n"
+                "Shows all tracks with full metadata:\n"
+                "BPM, key, genre, rating, play count,\n"
+                "comment, last played date.\n"
+                "\n"
+                "Use to get an overview of your library.")
         
         # 5. Order My Music
         self.order_music_button = ttk.Button(
@@ -140,7 +192,18 @@ class AudioAnalyzerGUI:
         )
         self.order_music_button.pack(side=tk.LEFT, padx=5)
         ToolTip(self.order_music_button,
-                "Organize music files: edit tags, move to folders, get genre suggestions")
+                "Full file manager for organising your library:\n"
+                "\n"
+                "  • Edit tags inline: title, artist, album,\n"
+                "    year, genre, BPM, comment, rating\n"
+                "  • Rename files on disk from the table\n"
+                "  • Move files to a folder via the folder\n"
+                "    tree panel on the right\n"
+                "  • Right-click → Suggest Genre & Cover Art\n"
+                "    via Last.fm API (needs .env API key)\n"
+                "  • ✓/✗ column shows embedded cover art\n"
+                "\n"
+                "Keyboard shortcuts 1\u20139 for favourite folders.")
         
         # 6. Analyze Files
         self.analyze_button = ttk.Button(
@@ -151,19 +214,44 @@ class AudioAnalyzerGUI:
         )
         self.analyze_button.pack(side=tk.LEFT, padx=5)
         ToolTip(self.analyze_button,
-                "Analyze audio files: BPM detection, key analysis, CUE point detection")
+                "Performs deep analysis on selected audio files:\n"
+                "\n"
+                "  • BPM Detection\n"
+                "    Tempo detection using librosa\n"
+                "    beat tracker algorithm\n"
+                "  • Musical Key\n"
+                "    Detected via Krumhansl-Schmuckler\n"
+                "    algorithm\n"
+                "  • CUE Points\n"
+                "    Auto-sets Intro, Build, Drop, Outro\n"
+                "    based on energy & beat analysis\n"
+                "\n"
+                "Results saved to tags + Traktor NML\n"
+                "when you click Save Changes.\n"
+                "Supports: MP3, FLAC, WAV, M4A.")
         
         # 7. Save Changes
         self.save_button = ttk.Button(
-            self.button_frame, 
-            text="💾 Save Changes", 
+            self.button_frame,
+            text="💾 Save Changes",
             command=self.save_changes,
             width=20,
-            state=tk.DISABLED  # Initially disabled
+            state=tk.DISABLED
         )
         self.save_button.pack(side=tk.LEFT, padx=5)
-        ToolTip(self.save_button, 
-                "Save analysis results:\n- MP3 tags: Title, BPM, Key\n- Traktor CUE points: Intro, Build, Drop, Outro")
+        ToolTip(self.save_button,
+                "Writes all pending changes to disk:\n"
+                "\n"
+                "  • ID3 / FLAC / M4A tags\n"
+                "    Updates Title, Artist, Album, Year,\n"
+                "    Genre, BPM, Key fields\n"
+                "\n"
+                "  • Traktor NML\n"
+                "    Writes CUE points (Intro, Build, Drop,\n"
+                "    Outro) into collection.nml\n"
+                "\n"
+                "Only available after running Analyze Files.\n"
+                "Warning: existing tags will be overwritten.")
         
         # 8. Delete Selected
         self.delete_selected_button = ttk.Button(
@@ -175,7 +263,32 @@ class AudioAnalyzerGUI:
         )
         self.delete_selected_button.pack(side=tk.LEFT, padx=5)
         ToolTip(self.delete_selected_button,
-                "Delete selected files to Recycle Bin")
+                "Moves selected files to the Windows\n"
+                "Recycle Bin.\n"
+                "\n"
+                "Files can be restored from the Recycle\n"
+                "Bin if deleted by mistake.\n"
+                "\n"
+                "Available in all modes. Use with caution.")
+
+        # Theme toggle button (right-aligned)
+        if _forest_theme_available:
+            self._theme_toggle_btn = ttk.Button(
+                self.button_frame,
+                text="☀️ Light",
+                command=self._toggle_theme,
+                width=10
+            )
+            self._theme_toggle_btn.pack(side=tk.RIGHT, padx=5)
+            ToolTip(self._theme_toggle_btn, "Switch between Forest Light and Forest Dark theme")
+
+        # Mode buttons for active-state highlighting
+        self._active_mode_btn = None
+        self._mode_buttons = [
+            self.find_duplicates_button, self.rename_files_button,
+            self.quality_check_button, self.collection_button,
+            self.order_music_button, self.analyze_button,
+        ]
 
         # Initialize playback controls and VLC player (if available)
         try:
@@ -207,20 +320,25 @@ class AudioAnalyzerGUI:
         
         # Create treeview (table)
         self.create_treeview()
-        
+        # Apply custom font/style overrides after theme + widgets are ready
+        self._apply_custom_styles()
+        # Style title bar + set icon (deferred so HWND is available)
+        self.root.after(150, self._style_window)
+        self.root.after(250, self._set_window_icon)
+
         # Bottom area: feedback (left) and status bar (right)
         self.bottom_frame = ttk.Frame(root)
         self.bottom_frame.pack(side=tk.BOTTOM, fill=tk.X)
 
         self.feedback_var = tk.StringVar()
         self.feedback_var.set("")
-        self.feedback_label = ttk.Label(self.bottom_frame, textvariable=self.feedback_var, anchor=tk.W)
+        self.feedback_label = ttk.Label(self.bottom_frame, textvariable=self.feedback_var, anchor=tk.W, font=("Segoe UI", 11))
         self.feedback_label.pack(side=tk.LEFT, fill=tk.X, padx=6)
 
         # Status bar (right)
         self.status_var = tk.StringVar()
         self.status_var.set("Ready")
-        self.status_bar = ttk.Label(self.bottom_frame, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
+        self.status_bar = ttk.Label(self.bottom_frame, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W, font=("Segoe UI", 11))
         self.status_bar.pack(side=tk.RIGHT, fill=tk.X)
 
         # Feedback animation handle
@@ -293,8 +411,8 @@ class AudioAnalyzerGUI:
         
         # Configure style for larger font in table
         style = ttk.Style()
-        style.configure("Table.Treeview", font=('Arial', 11), rowheight=25)
-        style.configure("Table.Treeview.Heading", font=('Arial', 11, 'bold'))
+        style.configure("Table.Treeview", font=('Segoe UI', 12), rowheight=28)
+        style.configure("Table.Treeview.Heading", font=('Segoe UI', 12, 'bold'))
         
         self.tree = ttk.Treeview(
             self.table_frame,
@@ -366,7 +484,7 @@ class AudioAnalyzerGUI:
         
         # Create folder tree (Treeview) with larger font
         style = ttk.Style()
-        style.configure("Folder.Treeview", font=('Arial', 11))
+        style.configure("Folder.Treeview", font=('Segoe UI', 12))
         self.folder_tree = ttk.Treeview(
             self.folder_frame,
             show="tree",
@@ -1000,6 +1118,7 @@ class AudioAnalyzerGUI:
         
         if not file_paths:
             return
+        self._set_active_button(self.analyze_button)
         # Disable delete while analyzing
         try:
             self.delete_selected_button.config(state=tk.DISABLED)
@@ -1387,6 +1506,93 @@ class AudioAnalyzerGUI:
 
         return meta
 
+    def _apply_custom_styles(self):
+        """Re-apply custom font/style overrides after any theme change."""
+        style = ttk.Style()
+        style.configure("Table.Treeview", font=('Segoe UI', 12), rowheight=28)
+        style.configure("Table.Treeview.Heading", font=('Segoe UI', 12, 'bold'),
+                        relief="groove", borderwidth=1)
+        style.configure("Folder.Treeview", font=('Segoe UI', 11))
+        style.configure("TButton", font=("Segoe UI", 11), padding=(10, 5), foreground="white")
+
+    def _toggle_theme(self):
+        """Switch between Forest light and dark themes."""
+        if self._current_theme == "forest-light":
+            self._current_theme = "forest-dark"
+            ttk.Style().theme_use("forest-dark")
+            self._theme_toggle_btn.config(text="☀️ Light")
+        else:
+            self._current_theme = "forest-light"
+            ttk.Style().theme_use("forest-light")
+            self._theme_toggle_btn.config(text="🌙 Dark")
+        self._apply_custom_styles()
+
+    def _set_active_button(self, active_btn):
+        """Highlight active mode button green (Accent.TButton), reset all others."""
+        for btn in getattr(self, '_mode_buttons', []):
+            try:
+                btn.configure(style="TButton")
+            except Exception:
+                pass
+        try:
+            if active_btn:
+                active_btn.configure(style="Accent.TButton")
+        except Exception:
+            pass
+        self._active_mode_btn = active_btn
+
+    def _style_window(self):
+        """Style the Windows title bar: dark gray, rounded corners, white text."""
+        try:
+            import ctypes
+            self.root.update_idletasks()
+            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
+            if not hwnd:
+                hwnd = self.root.winfo_id()
+            DWMWA_USE_IMMERSIVE_DARK_MODE  = 20
+            DWMWA_CAPTION_COLOR            = 35
+            DWMWA_TEXT_COLOR               = 36
+            DWMWA_WINDOW_CORNER_PREFERENCE = 33
+            DWMWCP_ROUND                   = 2
+            val = ctypes.c_int(1)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ctypes.byref(val), ctypes.sizeof(val))
+            caption_color = ctypes.c_int(0x00383838)   # dark gray (0x00BBGGRR)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, DWMWA_CAPTION_COLOR, ctypes.byref(caption_color), ctypes.sizeof(caption_color))
+            text_color = ctypes.c_int(0x00FFFFFF)       # white title text
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, DWMWA_TEXT_COLOR, ctypes.byref(text_color), ctypes.sizeof(text_color))
+            corner_pref = ctypes.c_int(DWMWCP_ROUND)    # Windows 11 rounded corners
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ctypes.byref(corner_pref), ctypes.sizeof(corner_pref))
+        except Exception:
+            pass
+
+    def _set_window_icon(self):
+        """Create a Forest-green music note icon and set it as the window icon."""
+        try:
+            from PIL import Image, ImageDraw
+            import tempfile
+            s = 64
+            img = Image.new('RGBA', (s, s), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            draw.ellipse([2, 2, s - 2, s - 2], fill=(33, 115, 70, 255))  # green circle
+            # Stem
+            sx, sy, ex, ey = s * 11 // 16, s // 5, s * 13 // 16, s * 4 // 5
+            draw.rectangle([sx, sy, ex, ey], fill=(255, 255, 255, 255))
+            # Note head
+            nx, ny = sx - s // 8, ey
+            draw.ellipse([nx - s // 9, ny - s // 12, nx + s // 8, ny + s // 12],
+                         fill=(255, 255, 255, 255))
+            # Flag
+            draw.polygon([(ex, sy), (ex + s // 4, sy + s // 5), (ex, sy + s // 5)],
+                         fill=(255, 255, 255, 255))
+            ico_path = os.path.join(tempfile.gettempdir(), 'musicanalyzer_icon.ico')
+            img.save(ico_path, format='ICO', sizes=[(64, 64), (32, 32), (16, 16)])
+            self.root.iconbitmap(ico_path)
+        except Exception:
+            pass
 
     def _init_playback_controls(self):
         """Create single playback control area below main buttons, above table."""
@@ -1568,6 +1774,7 @@ class AudioAnalyzerGUI:
         
         if not directory:
             return
+        self._set_active_button(self.find_duplicates_button)
         
         # Get tolerance value
         tolerance_sec = 3.0  # Default
@@ -1824,6 +2031,7 @@ class AudioAnalyzerGUI:
         
         if not directory:
             return
+        self._set_active_button(self.order_music_button)
         
         # Start order music process in a separate thread
         threading.Thread(target=self._order_music_thread, args=(directory,), daemon=True).start()
@@ -2097,6 +2305,7 @@ class AudioAnalyzerGUI:
         
         if not directory:
             return
+        self._set_active_button(self.rename_files_button)
         
         # Start rename process in a separate thread
         threading.Thread(target=self._rename_files_thread, args=(directory,), daemon=True).start()
@@ -2277,6 +2486,7 @@ class AudioAnalyzerGUI:
         if not files_to_scan:
             messagebox.showinfo("No Files", "No audio files found.")
             return
+        self._set_active_button(self.quality_check_button)
         
         # Start quality check in a separate thread
         threading.Thread(target=self._quality_check_thread, args=(files_to_scan,), daemon=True).start()
@@ -2810,6 +3020,7 @@ class AudioAnalyzerGUI:
         
         if not collection_path:
             return
+        self._set_active_button(self.collection_button)
         
         # Save the collection path
         save_collection_path(collection_path)
