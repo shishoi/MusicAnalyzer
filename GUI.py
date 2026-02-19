@@ -1,9 +1,21 @@
 import os
 import sys
+import re
+import io
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import threading
 import subprocess
+
+# Last.fm API support
+try:
+    import pylast
+    from dotenv import load_dotenv
+    load_dotenv()
+    _pylast_available = True
+except ImportError:
+    pylast = None
+    _pylast_available = False
 
 # Import required modules
 from audio_analyzer import AudioAnalyzer, TraktorNMLEditor, find_duplicate_songs, load_collection_path, save_collection_path, parse_traktor_collection
@@ -237,10 +249,30 @@ class AudioAnalyzerGUI:
         # Order My Music mode variables
         self.order_music_files = {}  # Store file data for order_music mode
         self.selected_target_folder = None  # Target folder for moving files
-        self.spotify_offset = 0  # Offset for genre suggestions
-        self.genre_suggestions = {}  # Cache for Spotify genre results
+        self.genre_suggestions = {}  # Cache for Last.fm genre results
         self.favorite_folders = {}  # Keyboard shortcut mappings (1-9)
+        self.lastfm_popup_open = False  # Track if Last.fm popup is open
         # Note: folder_tree, paned_window, folder_frame are created above
+
+        # Last.fm API setup
+        self.lastfm_network = None
+        if _pylast_available:
+            try:
+                api_key = os.getenv("LASTFM_API_KEY", "")
+                api_secret = os.getenv("LASTFM_API_SECRET", "")
+                if api_key and api_key != "your_api_key_here":
+                    self.lastfm_network = pylast.LastFMNetwork(
+                        api_key=api_key,
+                        api_secret=api_secret,
+                    )
+                    self.lastfm_network.enable_rate_limit()
+                    self.lastfm_network.enable_caching(os.path.join(os.path.dirname(__file__), "lastfm_cache"))
+                    print("Last.fm API connected successfully")
+                else:
+                    print("Last.fm API keys not configured. Set LASTFM_API_KEY and LASTFM_API_SECRET in .env")
+            except Exception as e:
+                print(f"Failed to initialize Last.fm: {e}")
+                self.lastfm_network = None
 
     def create_treeview(self):
         # Scrollbar
@@ -793,7 +825,7 @@ class AudioAnalyzerGUI:
         # Order My Music columns
         self.order_music_columns = (
             "filepath", "filename", "title", "artist", "album", "year", 
-            "genre", "comment", "length", "type", "size_mb", "bitrate", "rating", "bpm"
+            "genre", "comment", "length", "type", "size_mb", "bitrate", "rating", "bpm", "has_cover"
         )
         
         # Reconfigure with order_music columns
@@ -814,6 +846,7 @@ class AudioAnalyzerGUI:
         self.tree.heading("bitrate", text="Bitrate")
         self.tree.heading("rating", text="Rating")
         self.tree.heading("bpm", text="BPM")
+        self.tree.heading("has_cover", text="Cover")
         
         # Define columns width
         self.tree.column("filepath", width=0, stretch=tk.NO)  # Hidden but needed for reference
@@ -830,6 +863,7 @@ class AudioAnalyzerGUI:
         self.tree.column("bitrate", width=80)
         self.tree.column("rating", width=60)
         self.tree.column("bpm", width=50)
+        self.tree.column("has_cover", width=50)
     
     def on_cell_double_click(self, event):
         """Handle double-click on a cell to edit the value"""
@@ -863,7 +897,7 @@ class AudioAnalyzerGUI:
         
         # In order_music mode, prevent editing read-only columns
         if self.current_mode == 'order_music':
-            readonly_columns = ['length', 'type', 'size_mb', 'bitrate', 'filepath']
+            readonly_columns = ['length', 'type', 'size_mb', 'bitrate', 'filepath', 'has_cover']
             if column_name in readonly_columns:
                 return  # Don't allow editing these columns
         
@@ -1867,7 +1901,8 @@ class AudioAnalyzerGUI:
                         'size_mb': meta.get('size_mb', ''),
                         'bitrate': meta.get('bitrate', ''),
                         'rating': rating,
-                        'bpm': meta.get('bpm', '')
+                        'bpm': meta.get('bpm', ''),
+                        'has_cover': '✓' if meta.get('has_cover', 0) else '✗'
                     }
                     
                     # Add to table
@@ -1888,7 +1923,8 @@ class AudioAnalyzerGUI:
                             meta.get('size_mb', ''),
                             meta.get('bitrate', ''),
                             rating,
-                            meta.get('bpm', '')
+                            meta.get('bpm', ''),
+                            '✓' if meta.get('has_cover', 0) else '✗'
                         )
                     )
                     
@@ -2959,6 +2995,10 @@ class AudioAnalyzerGUI:
 
     def _on_tree_right_click(self, event):
         """Handle right-click on treeview row. Show context menu."""
+        # Don't show context menu while Last.fm popup is open
+        if getattr(self, 'lastfm_popup_open', False):
+            return
+        
         item = self.tree.identify_row(event.y)
         if not item:
             return
@@ -2978,11 +3018,398 @@ class AudioAnalyzerGUI:
             command=lambda: self._open_in_explorer(filepath)
         )
         
+        # Add Last.fm options in order_music mode
+        if self.current_mode == 'order_music':
+            context_menu.add_separator()
+            if self.lastfm_network:
+                context_menu.add_command(
+                    label="🎵 Suggest Genre & Cover (Last.fm)",
+                    command=lambda: self._show_lastfm_suggestion_popup(item)
+                )
+            else:
+                context_menu.add_command(
+                    label="🎵 Suggest Genre & Cover (Last.fm) - Not configured",
+                    state=tk.DISABLED
+                )
+        
         # Show context menu at cursor position
         try:
             context_menu.tk_popup(event.x_root, event.y_root)
         finally:
             context_menu.grab_release()
+
+    # ======================== Last.fm Integration ========================
+
+    def _show_lastfm_suggestion_popup(self, tree_item):
+        """Show combined Genre & Cover suggestion popup from Last.fm"""
+        filepath = self.tree.set(tree_item, "filepath")
+        artist = self.tree.set(tree_item, "artist")
+        title = self.tree.set(tree_item, "title")
+        
+        if not artist and not title:
+            messagebox.showinfo("Missing Info", "No artist or title found for this track.\nPlease edit the artist and title first.")
+            return
+        
+        # Show loading message
+        self.status_var.set(f"Fetching Last.fm data for: {artist} - {title}...")
+        self.root.update_idletasks()
+        
+        # Fetch data in background thread
+        def fetch_and_show():
+            genres = []
+            cover_url = None
+            
+            try:
+                # Try to get track from Last.fm
+                track = self.lastfm_network.get_track(artist, title)
+                
+                # Get genre tags
+                try:
+                    top_tags = track.get_top_tags(limit=10)
+                    genres = [(t.item.get_name(), t.weight) for t in top_tags if t.weight and int(t.weight) > 0]
+                except Exception:
+                    pass
+                
+                # Fall back to artist tags if track has none
+                if not genres and artist:
+                    try:
+                        lastfm_artist = self.lastfm_network.get_artist(artist)
+                        top_tags = lastfm_artist.get_top_tags(limit=10)
+                        genres = [(t.item.get_name(), t.weight) for t in top_tags if t.weight and int(t.weight) > 0]
+                    except Exception:
+                        pass
+                
+                # Get cover art URL
+                try:
+                    cover_url = track.get_cover_image(pylast.SIZE_EXTRA_LARGE)
+                except Exception:
+                    pass
+                
+                # Fall back to album cover
+                if not cover_url:
+                    try:
+                        album = track.get_album()
+                        if album:
+                            cover_url = album.get_cover_image(pylast.SIZE_EXTRA_LARGE)
+                    except Exception:
+                        pass
+                
+            except pylast.WSError as e:
+                self.root.after(0, lambda: self.status_var.set(f"Last.fm: Track not found - {e}"))
+            except Exception as e:
+                self.root.after(0, lambda: self.status_var.set(f"Last.fm error: {e}"))
+            
+            # Cache results
+            self.genre_suggestions[filepath] = genres
+            
+            # Show popup in main thread
+            self.root.after(0, lambda: self._create_lastfm_popup(
+                tree_item, filepath, artist, title, genres, cover_url
+            ))
+        
+        threading.Thread(target=fetch_and_show, daemon=True).start()
+
+    def _create_lastfm_popup(self, tree_item, filepath, artist, title, genres, cover_url):
+        """Create the combined genre & cover suggestion popup"""
+        try:
+            from PIL import Image, ImageTk
+            pil_available = True
+        except ImportError:
+            pil_available = False
+        
+        self.status_var.set("Ready")
+        self.lastfm_popup_open = True  # Block right-click menu while popup is open
+        
+        popup = tk.Toplevel(self.root)
+        popup.title(f"Last.fm Suggestions - {artist} - {title}")
+        popup.geometry("700x550")
+        popup.transient(self.root)
+        popup.grab_set()
+        
+        def on_popup_close():
+            self.lastfm_popup_open = False
+            popup.destroy()
+        
+        popup.protocol("WM_DELETE_WINDOW", on_popup_close)
+        
+        # Center the popup
+        popup.update_idletasks()
+        x = (popup.winfo_screenwidth() // 2) - 350
+        y = (popup.winfo_screenheight() // 2) - 275
+        popup.geometry(f"+{x}+{y}")
+        
+        # Main container
+        main_frame = ttk.Frame(popup, padding=10)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # ---- Genre Section ----
+        genre_frame = ttk.LabelFrame(main_frame, text="Genre Suggestions", padding=10)
+        genre_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # Current genre display
+        current_genre = self.tree.set(tree_item, "genre")
+        ttk.Label(genre_frame, text=f"Current genre: {current_genre or '(none)'}", 
+                  font=("Arial", 10)).pack(anchor=tk.W)
+        
+        # Genre selection
+        selected_genre = tk.StringVar(value="")
+        
+        if genres:
+            genre_list_frame = ttk.Frame(genre_frame)
+            genre_list_frame.pack(fill=tk.X, pady=(5, 0))
+            
+            # Create radio buttons for each genre suggestion
+            for i, (genre_name, weight) in enumerate(genres[:8]):
+                rb = ttk.Radiobutton(
+                    genre_list_frame,
+                    text=f"{genre_name} ({weight})",
+                    variable=selected_genre,
+                    value=genre_name
+                )
+                rb.grid(row=i // 2, column=i % 2, sticky=tk.W, padx=10, pady=2)
+            
+            # "None" option - don't change genre
+            ttk.Radiobutton(
+                genre_list_frame,
+                text="Don't change genre",
+                variable=selected_genre,
+                value=""
+            ).grid(row=(len(genres[:8])) // 2 + 1, column=0, sticky=tk.W, padx=10, pady=2)
+        else:
+            ttk.Label(genre_frame, text="No genre suggestions found on Last.fm",
+                      foreground="gray").pack(anchor=tk.W, pady=5)
+        
+        # ---- Cover Art Section ----
+        cover_frame = ttk.LabelFrame(main_frame, text="Cover Art", padding=10)
+        cover_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        
+        covers_row = ttk.Frame(cover_frame)
+        covers_row.pack(fill=tk.BOTH, expand=True)
+        
+        # Current cover (left)
+        current_cover_frame = ttk.Frame(covers_row)
+        current_cover_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
+        ttk.Label(current_cover_frame, text="Current Cover", font=("Arial", 10, "bold")).pack()
+        
+        current_cover_label = ttk.Label(current_cover_frame, text="Loading...")
+        current_cover_label.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        # Suggested cover (right)
+        suggested_cover_frame = ttk.Frame(covers_row)
+        suggested_cover_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(5, 0))
+        ttk.Label(suggested_cover_frame, text="Last.fm Cover", font=("Arial", 10, "bold")).pack()
+        
+        suggested_cover_label = ttk.Label(suggested_cover_frame, text="Loading...")
+        suggested_cover_label.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        # Use new cover checkbox
+        use_new_cover = tk.BooleanVar(value=False)
+        cover_checkbox = ttk.Checkbutton(cover_frame, text="Use new cover", variable=use_new_cover)
+        cover_checkbox.pack(anchor=tk.W, pady=(5, 0))
+        
+        # Store references for image display
+        popup._cover_images = {}
+        
+        # Load current cover art
+        self._load_current_cover(filepath, current_cover_label, popup, pil_available)
+        
+        # Load suggested cover art from URL
+        self._lastfm_cover_url = cover_url
+        if cover_url:
+            self._load_suggested_cover(cover_url, suggested_cover_label, popup, pil_available, cover_checkbox)
+        else:
+            suggested_cover_label.config(text="No cover found on Last.fm")
+            cover_checkbox.config(state=tk.DISABLED)
+        
+        # ---- Buttons ----
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=(5, 0))
+        
+        def on_save():
+            genre_val = selected_genre.get()
+            save_cover = use_new_cover.get()
+            
+            # Save genre if selected
+            if genre_val:
+                self.tree.set(tree_item, "genre", genre_val)
+                self._save_order_music_tag(filepath, "genre", genre_val)
+                if filepath in self.order_music_files:
+                    self.order_music_files[filepath]['genre'] = genre_val
+                self.status_var.set(f"Genre updated to: {genre_val}")
+            
+            # Save cover art if checked
+            if save_cover and cover_url:
+                threading.Thread(
+                    target=self._save_cover_art_from_url,
+                    args=(filepath, cover_url, tree_item),
+                    daemon=True
+                ).start()
+            
+            self.lastfm_popup_open = False
+            popup.destroy()
+        
+        def on_exit():
+            self.lastfm_popup_open = False
+            popup.destroy()
+        
+        ttk.Button(button_frame, text="💾 Save", command=on_save, width=15).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="❌ Exit", command=on_exit, width=15).pack(side=tk.RIGHT, padx=5)
+
+    def _load_current_cover(self, filepath, label, popup, pil_available):
+        """Load and display current embedded cover art"""
+        def load():
+            try:
+                from mutagen import File as MutagenFile
+                audio = MutagenFile(filepath)
+                cover_data = None
+                
+                if pil_available:
+                    from PIL import Image, ImageTk
+                
+                if audio is None:
+                    self.root.after(0, lambda: label.config(text="No cover embedded"))
+                    return
+                
+                # MP3 - APIC frame
+                if hasattr(audio, 'tags') and audio.tags:
+                    for key in audio.tags:
+                        if 'APIC' in key:
+                            frame = audio.tags[key]
+                            cover_data = getattr(frame, 'data', None)
+                            if cover_data and len(cover_data) > 100:
+                                break
+                
+                # FLAC
+                if not cover_data and hasattr(audio, 'pictures'):
+                    for pic in audio.pictures:
+                        if pic.data and len(pic.data) > 100:
+                            cover_data = pic.data
+                            break
+                
+                # MP4/M4A
+                if not cover_data and 'covr' in (audio.tags or {}):
+                    covers = audio.tags['covr']
+                    if covers:
+                        cover_data = bytes(covers[0])
+                
+                if cover_data and pil_available:
+                    img = Image.open(io.BytesIO(cover_data))
+                    img.thumbnail((200, 200))
+                    photo = ImageTk.PhotoImage(img)
+                    popup._cover_images['current'] = photo
+                    self.root.after(0, lambda: label.config(image=photo, text=""))
+                elif cover_data:
+                    self.root.after(0, lambda: label.config(text="Cover exists (PIL needed to display)"))
+                else:
+                    self.root.after(0, lambda: label.config(text="No cover embedded"))
+                    
+            except Exception as e:
+                self.root.after(0, lambda: label.config(text=f"Error: {e}"))
+        
+        threading.Thread(target=load, daemon=True).start()
+
+    def _load_suggested_cover(self, cover_url, label, popup, pil_available, checkbox):
+        """Download and display suggested cover from Last.fm URL"""
+        def load():
+            try:
+                import httpx
+                if pil_available:
+                    from PIL import Image, ImageTk
+                response = httpx.get(cover_url, timeout=10)
+                if response.status_code == 200 and len(response.content) > 100:
+                    if pil_available:
+                        img = Image.open(io.BytesIO(response.content))
+                        img.thumbnail((200, 200))
+                        photo = ImageTk.PhotoImage(img)
+                        popup._cover_images['suggested'] = photo
+                        self.root.after(0, lambda: label.config(image=photo, text=""))
+                    else:
+                        self.root.after(0, lambda: label.config(text="Cover available (PIL needed to display)"))
+                else:
+                    self.root.after(0, lambda: label.config(text="No valid cover from Last.fm"))
+                    self.root.after(0, lambda: checkbox.config(state=tk.DISABLED))
+            except Exception as e:
+                self.root.after(0, lambda: label.config(text=f"Download failed: {e}"))
+                self.root.after(0, lambda: checkbox.config(state=tk.DISABLED))
+        
+        threading.Thread(target=load, daemon=True).start()
+
+    def _save_cover_art_from_url(self, filepath, cover_url, tree_item):
+        """Download cover art from URL and embed into audio file"""
+        try:
+            import httpx
+            self.root.after(0, lambda: self.status_var.set("Downloading cover art..."))
+            
+            response = httpx.get(cover_url, timeout=15)
+            if response.status_code != 200 or len(response.content) < 100:
+                self.root.after(0, lambda: self.status_var.set("Failed to download cover art"))
+                return
+            
+            cover_data = response.content
+            mime_type = response.headers.get('content-type', 'image/jpeg')
+            
+            # Embed cover art using mutagen
+            from mutagen import File as MutagenFile
+            
+            if filepath.lower().endswith('.mp3'):
+                from mutagen.id3 import ID3, APIC
+                try:
+                    audio = ID3(filepath)
+                except Exception:
+                    from mutagen.id3 import ID3NoHeaderError
+                    audio = ID3()
+                
+                # Remove existing APIC frames
+                audio.delall('APIC')
+                
+                # Add new cover
+                audio.add(APIC(
+                    encoding=3,  # UTF-8
+                    mime=mime_type,
+                    type=3,  # Front cover
+                    desc='Cover',
+                    data=cover_data
+                ))
+                audio.save(filepath)
+                
+            elif filepath.lower().endswith('.flac'):
+                from mutagen.flac import FLAC, Picture
+                audio = FLAC(filepath)
+                
+                # Create picture
+                pic = Picture()
+                pic.type = 3  # Front cover
+                pic.mime = mime_type
+                pic.desc = 'Cover'
+                pic.data = cover_data
+                
+                audio.clear_pictures()
+                audio.add_picture(pic)
+                audio.save()
+                
+            elif filepath.lower().endswith(('.m4a', '.mp4', '.aac')):
+                from mutagen.mp4 import MP4, MP4Cover
+                audio = MP4(filepath)
+                
+                fmt = MP4Cover.FORMAT_JPEG
+                if 'png' in mime_type:
+                    fmt = MP4Cover.FORMAT_PNG
+                
+                audio.tags['covr'] = [MP4Cover(cover_data, imageformat=fmt)]
+                audio.save()
+            else:
+                self.root.after(0, lambda: self.status_var.set("Cover embedding not supported for this format"))
+                return
+            
+            # Update treeview
+            self.root.after(0, lambda: self.tree.set(tree_item, "has_cover", "✓"))
+            if filepath in self.order_music_files:
+                self.order_music_files[filepath]['has_cover'] = '✓'
+            
+            self.root.after(0, lambda: self.status_var.set("Cover art saved successfully!"))
+            
+        except Exception as e:
+            self.root.after(0, lambda: self.status_var.set(f"Error saving cover: {e}"))
 
     def _show_cover_popup(self, cover_path):
         """Show cover art in a popup window. Uses PIL if available."""
