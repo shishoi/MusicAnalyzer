@@ -90,9 +90,13 @@ class AudioAnalyzerGUI:
         self.main_frame = ttk.Frame(root, padding="10")
         self.main_frame.pack(fill=tk.BOTH, expand=True)
         
-        # Create button frame
+        # Create button frame (mode buttons)
         self.button_frame = ttk.Frame(self.main_frame)
-        self.button_frame.pack(fill=tk.X, pady=10)
+        self.button_frame.pack(fill=tk.X, pady=(10, 2))
+
+        # Action frame (Delete / Save) — sits below the mode buttons
+        self.action_frame = ttk.Frame(self.main_frame)
+        self.action_frame.pack(fill=tk.X, pady=(0, 6))
         
         # Add buttons (reordered and renamed)
         # 1. Find Duplicates
@@ -232,7 +236,7 @@ class AudioAnalyzerGUI:
         
         # 7. Save Changes
         self.save_button = ttk.Button(
-            self.button_frame,
+            self.action_frame,
             text="💾 Save Changes",
             command=self.save_changes,
             width=20,
@@ -256,7 +260,7 @@ class AudioAnalyzerGUI:
         
         # 8. Delete Selected
         self.delete_selected_button = ttk.Button(
-            self.button_frame,
+            self.action_frame,
             text="🗑️ Delete Selected",
             command=self.delete_selected_files,
             width=20,
@@ -491,7 +495,7 @@ class AudioAnalyzerGUI:
             command=self._toggle_expand_collapse_all,
             width=15
         )
-        self.expand_collapse_button.pack(side=tk.RIGHT)
+        self.expand_collapse_button.pack(side=tk.LEFT)
         
         # Scrollbar for folder tree
         tree_scroll = ttk.Scrollbar(self.folder_frame, orient="vertical")
@@ -1075,11 +1079,8 @@ class AudioAnalyzerGUI:
         # Get column name
         column_index = int(column[1:]) - 1
         column_name = self.tree["columns"][column_index]
-        # If filepath column clicked, open in Explorer
+        # filepath column: not inline-editable — skip silently
         if column_name == "filepath":
-            path = self.tree.set(item, "filepath")
-            if path:
-                self._open_in_explorer(path)
             return
 
         # If cover column clicked, show cover popup if available
@@ -1630,7 +1631,7 @@ class AudioAnalyzerGUI:
         # Save Changes only visible in analyze mode
         try:
             if active_btn == self.analyze_button:
-                self.save_button.pack(side=tk.RIGHT, padx=(0, 5))
+                self.save_button.pack(side=tk.LEFT, padx=5)
                 self.save_button.config(state=tk.DISABLED)
             else:
                 self.save_button.pack_forget()
@@ -1806,7 +1807,7 @@ class AudioAnalyzerGUI:
         try:
             from PIL import Image, ImageTk, ImageSequence
             img = Image.open(gif_path)
-            size = (110, 110)
+            size = (200, 200)
             for frame in ImageSequence.Iterator(img):
                 f = frame.copy().convert("RGBA")
                 f.thumbnail(size)
@@ -1819,7 +1820,7 @@ class AudioAnalyzerGUI:
         if not getattr(self, '_gif_frames', None):
             return
         self._gif_label.configure(image=self._gif_frames[0])
-        self._gif_label.place(relx=0.5, rely=0.42, anchor=tk.CENTER)
+        self._gif_label.place(relx=0.5, rely=0.45, anchor=tk.CENTER)
         self._gif_label.lift()
         self._gif_frame_idx = 0
         self._gif_tick()
@@ -3421,32 +3422,26 @@ class AudioAnalyzerGUI:
             messagebox.showerror("Error", f"Could not open file explorer: {e}")
 
     def _on_tree_right_click(self, event):
-        """Handle right-click on treeview row. Show context menu."""
-        # Don't show context menu while Last.fm popup is open
+        """Right-click: open file in Explorer. In order_music mode also show Last.fm menu."""
         if getattr(self, 'lastfm_popup_open', False):
             return
-        
+
         item = self.tree.identify_row(event.y)
         if not item:
             return
-        
-        # Select the row
+
         self.tree.selection_set(item)
-        
-        # Get filepath from row
         filepath = self.tree.set(item, "filepath")
         if not filepath:
             return
-        
-        # Create context menu
-        context_menu = tk.Menu(self.tree, tearoff=False)
-        context_menu.add_command(
-            label="Open in Explorer",
-            command=lambda: self._open_in_explorer(filepath)
-        )
-        
-        # Add Last.fm options in order_music mode
+
+        # In order_music mode show a small context menu so Last.fm is still reachable
         if self.current_mode == 'order_music':
+            context_menu = tk.Menu(self.tree, tearoff=False)
+            context_menu.add_command(
+                label="📂 Open in Explorer",
+                command=lambda: self._open_in_explorer(filepath)
+            )
             context_menu.add_separator()
             if self.lastfm_network:
                 context_menu.add_command(
@@ -3455,15 +3450,16 @@ class AudioAnalyzerGUI:
                 )
             else:
                 context_menu.add_command(
-                    label="🎵 Suggest Genre & Cover (Last.fm) - Not configured",
+                    label="🎵 Suggest Genre & Cover (Last.fm) — not configured",
                     state=tk.DISABLED
                 )
-        
-        # Show context menu at cursor position
-        try:
-            context_menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            context_menu.grab_release()
+            try:
+                context_menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                context_menu.grab_release()
+        else:
+            # All other modes: right-click opens directly in Explorer
+            self._open_in_explorer(filepath)
 
     # ======================== Last.fm Integration ========================
 
