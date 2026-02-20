@@ -239,10 +239,10 @@ class AudioAnalyzerGUI:
             self.action_frame,
             text="💾 Save Changes",
             command=self.save_changes,
-            width=20,
+            width=15,
             state=tk.DISABLED
         )
-        self.save_button.pack(side=tk.LEFT, padx=5)
+        self.save_button.pack(side=tk.RIGHT, padx=(0, 2))
         self.save_button.pack_forget()  # Hidden until analyze mode is active
         ToolTip(self.save_button,
                 "Writes all pending changes to disk:\n"
@@ -263,7 +263,7 @@ class AudioAnalyzerGUI:
             self.action_frame,
             text="🗑️ Delete Selected",
             command=self.delete_selected_files,
-            width=20,
+            width=15,
             state=tk.DISABLED
         )
         self.delete_selected_button.pack(side=tk.RIGHT, padx=(0, 5))
@@ -389,6 +389,7 @@ class AudioAnalyzerGUI:
         self.favorite_folders = {}  # Keyboard shortcut mappings (1-9)
         self.lastfm_popup_open = False  # Track if Last.fm popup is open
         self._stop_flag = threading.Event()  # Signal running threads to abort
+        self._library_root = r"C:\Users\home\Music"  # Default library root for folder tree
         # Note: folder_tree, paned_window, folder_frame are created above
 
         # Last.fm API setup
@@ -485,7 +486,7 @@ class AudioAnalyzerGUI:
         )
         self.apply_move_button.pack(fill=tk.X)
         
-        # Expand/Collapse all button (smaller, right-aligned)
+        # Expand/Collapse + Change Library buttons
         self.folders_expanded = True  # Track expansion state
         collapse_frame = ttk.Frame(button_frame)
         collapse_frame.pack(fill=tk.X, pady=(5, 0))
@@ -496,6 +497,15 @@ class AudioAnalyzerGUI:
             width=15
         )
         self.expand_collapse_button.pack(side=tk.LEFT)
+        self.change_library_button = ttk.Button(
+            collapse_frame,
+            text="📂 Change Library",
+            command=self._change_library_folder,
+            width=16
+        )
+        self.change_library_button.pack(side=tk.RIGHT)
+        ToolTip(self.change_library_button,
+                "Choose a different root folder\nto display in the folder tree.")
         
         # Scrollbar for folder tree
         tree_scroll = ttk.Scrollbar(self.folder_frame, orient="vertical")
@@ -562,30 +572,40 @@ class AudioAnalyzerGUI:
             collapse_children(item)
     
     def _populate_folder_tree(self):
-        """Populate folder tree with C:/Users/home/Music directory structure"""
+        """Populate folder tree from self._library_root."""
         if not self.folder_tree:
             return
-        
+
         # Clear existing items
         for item in self.folder_tree.get_children():
             self.folder_tree.delete(item)
-        
-        # Root folder (C:/Users/home/Music)
-        root_folder = r"C:\Users\home\Music"
-        
+
+        root_folder = getattr(self, '_library_root', r"C:\Users\home\Music")
+
         # Check if folder exists
         if not os.path.exists(root_folder):
-            # Try to create it
             try:
                 os.makedirs(root_folder, exist_ok=True)
             except Exception:
                 root_folder = "C:/"
-        
+
         # Insert root
         root_id = self.folder_tree.insert("", tk.END, text=root_folder, open=True, values=(root_folder,))
-        
+
         # Populate subdirectories
         self._add_folder_children(root_id, root_folder)
+
+    def _change_library_folder(self):
+        """Let the user pick a new root folder for the folder tree."""
+        new_root = filedialog.askdirectory(
+            title="Select Library Folder",
+            initialdir=getattr(self, '_library_root', r"C:\Users\home\Music"),
+            parent=self.root
+        )
+        if new_root:
+            self._library_root = os.path.normpath(new_root)
+            self._populate_folder_tree()
+            self.status_var.set(f"Library folder: {self._library_root}")
     
     def _add_folder_children(self, parent_id, folder_path):
         """Recursively add subdirectories to folder tree"""
@@ -1631,7 +1651,7 @@ class AudioAnalyzerGUI:
         # Save Changes only visible in analyze mode
         try:
             if active_btn == self.analyze_button:
-                self.save_button.pack(side=tk.LEFT, padx=5)
+                self.save_button.pack(side=tk.RIGHT, padx=(0, 2))
                 self.save_button.config(state=tk.DISABLED)
             else:
                 self.save_button.pack_forget()
