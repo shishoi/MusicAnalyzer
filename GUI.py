@@ -506,7 +506,21 @@ class AudioAnalyzerGUI:
         self.change_library_button.pack(side=tk.RIGHT)
         ToolTip(self.change_library_button,
                 "Choose a different root folder\nto display in the folder tree.")
-        
+
+        # Search bar
+        search_frame = ttk.Frame(self.folder_frame)
+        search_frame.pack(fill=tk.X, padx=5, pady=(4, 2))
+        ttk.Label(search_frame, text="🔍", font=("Segoe UI", 11)).pack(side=tk.LEFT, padx=(0, 4))
+        self._folder_search_var = tk.StringVar()
+        self._folder_search_entry = ttk.Entry(search_frame, textvariable=self._folder_search_var, font=("Segoe UI", 11))
+        self._folder_search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._folder_search_clear_btn = ttk.Button(
+            search_frame, text="✕", width=3,
+            command=lambda: (self._folder_search_var.set(""), self._filter_folder_tree())
+        )
+        self._folder_search_clear_btn.pack(side=tk.LEFT, padx=(3, 0))
+        self._folder_search_entry.bind("<KeyRelease>", lambda e: self._filter_folder_tree())
+
         # Scrollbar for folder tree
         tree_scroll = ttk.Scrollbar(self.folder_frame, orient="vertical")
         tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
@@ -604,8 +618,56 @@ class AudioAnalyzerGUI:
         )
         if new_root:
             self._library_root = os.path.normpath(new_root)
+            # Clear search and repopulate
+            if hasattr(self, '_folder_search_var'):
+                self._folder_search_var.set("")
             self._populate_folder_tree()
             self.status_var.set(f"Library folder: {self._library_root}")
+
+    def _filter_folder_tree(self):
+        """Filter the folder tree to show only folders matching the search query."""
+        query = getattr(self, '_folder_search_var', None)
+        query = query.get().strip().lower() if query else ""
+
+        if not query:
+            # Restore normal tree view
+            self._populate_folder_tree()
+            return
+
+        if not hasattr(self, 'folder_tree') or not self.folder_tree:
+            return
+
+        # Clear existing items
+        for item in self.folder_tree.get_children():
+            self.folder_tree.delete(item)
+
+        root_folder = getattr(self, '_library_root', r"C:\Users\home\Music")
+        if not os.path.exists(root_folder):
+            return
+
+        matches = []
+        try:
+            for dirpath, dirnames, _ in os.walk(root_folder):
+                # Skip hidden folders
+                dirnames[:] = [d for d in dirnames if not d.startswith('.')]
+                for d in dirnames:
+                    if query in d.lower():
+                        matches.append(os.path.join(dirpath, d))
+                if len(matches) >= 200:  # safety cap
+                    break
+        except Exception:
+            pass
+
+        matches.sort(key=lambda p: os.path.basename(p).lower())
+
+        if matches:
+            for folder_path in matches:
+                display = f"📁 {os.path.basename(folder_path)}  ({os.path.dirname(folder_path)})"
+                self.folder_tree.insert("", tk.END, text=display, values=(folder_path,))
+            self.status_var.set(f"Found {len(matches)} folder(s) matching '{query}'")
+        else:
+            self.folder_tree.insert("", tk.END, text="No matching folders found.", values=("",))
+            self.status_var.set(f"No folders matching '{query}'")
     
     def _add_folder_children(self, parent_id, folder_path):
         """Recursively add subdirectories to folder tree"""
