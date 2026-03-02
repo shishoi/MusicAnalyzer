@@ -1086,14 +1086,18 @@ def parse_traktor_collection(collection_path):
     Parse Traktor collection.nml file and extract comprehensive track metadata.
     
     Args:
-        collection_path (str): Path to the collection folder
+        collection_path (str): Path to the collection folder OR direct .nml file path
     
     Returns:
         list: List of dicts with track metadata including all Traktor tags
     """
     import urllib.parse
     
-    nml_path = os.path.join(collection_path, "collection.nml")
+    # Accept either a direct .nml file path or a folder containing collection.nml
+    if collection_path.lower().endswith('.nml') and os.path.isfile(collection_path):
+        nml_path = collection_path
+    else:
+        nml_path = os.path.join(collection_path, "collection.nml")
     
     if not os.path.exists(nml_path):
         print(f"collection.nml not found at: {nml_path}")
@@ -1192,11 +1196,27 @@ def parse_traktor_collection(collection_path):
 
             track['filepath'] = location
 
-            track['title'] = entry.get('TITLE', '')
-            track['artist'] = entry.get('ARTIST', '')
+            # Title — prefer TITLE_USER (original text typed by user); fall back to TITLE
+            raw_title       = entry.get('TITLE', '')
+            user_title      = entry.get('TITLE_USER', '')
+            track['title']      = user_title if user_title else raw_title
+            track['title_user'] = user_title
+
+            # Artist — prefer ARTIST_USER; fall back to ARTIST
+            raw_artist      = entry.get('ARTIST', '')
+            user_artist     = entry.get('ARTIST_USER', '')
+            track['artist']     = user_artist if user_artist else raw_artist
+            track['artist_user']= user_artist
+
             track['album'] = entry.get('ALBUM', '')
             track['genre'] = entry.get('GENRE', '')
-            track['comment'] = entry.get('COMMENT', '')
+
+            # Comment — prefer COMMENT_USER; fall back to COMMENT
+            raw_comment     = entry.get('COMMENT', '')
+            user_comment    = entry.get('COMMENT_USER', '')
+            track['comment']    = user_comment if user_comment else raw_comment
+            track['comment_user']= user_comment
+
             track['remixer'] = entry.get('REMIXER', '')
             track['producer'] = entry.get('PRODUCER', '')
             track['label'] = entry.get('LABEL', '')
@@ -1241,47 +1261,32 @@ def parse_traktor_collection(collection_path):
                 track['key_text'] = ''
             
             # Extract cover art (COVER element)
+            # NOTE: base64 decoding is deferred to click time to keep load fast.
+            # has_cover  — True if any cover data or path exists in the NML
+            # _cover_data — raw base64 string (decoded lazily when popup is opened)
+            # cover_path  — resolved file path when COVER has a PATH attr (no decode needed)
             cover = entry.find('COVER')
+            has_cover  = False
             cover_path = ''
+            cover_data = None
             if cover is not None:
-                # COVER element may include base64 DATA or a PATH attribute
-                data = cover.get('DATA') or cover.get('IMAGE') or None
+                data      = cover.get('DATA') or cover.get('IMAGE') or None
                 path_attr = cover.get('PATH') or cover.get('FILE') or None
                 if data:
-                    # Try to decode base64 data and write to temp file
-                    try:
-                        import base64, tempfile, re
-                        # Data may contain the mime prefix like data:image/png;base64,xxx
-                        m = re.match(r"data:(.*?);base64,(.*)", data)
-                        if m:
-                            b64 = m.group(2)
-                            ext = 'png' if 'png' in m.group(1) else 'jpg'
-                        else:
-                            b64 = data
-                            ext = 'jpg'
-                        decoded = base64.b64decode(b64)
-                        tmp = tempfile.gettempdir()
-                        safe_title = re.sub(r"[^0-9a-zA-Z_-]", "_", track.get('title','')[:40]) or f"cover_{idx}"
-                        out_path = os.path.join(tmp, f"{safe_title}.{ext}")
-                        with open(out_path, 'wb') as imgf:
-                            imgf.write(decoded)
-                        cover_path = out_path
-                    except Exception:
-                        cover_path = ''
+                    has_cover  = True
+                    cover_data = data          # lazy decode on first popup open
                 elif path_attr:
-                    # If path is provided, try to decode percent-encoding
+                    has_cover = True
                     try:
-                        import urllib.parse
                         p = urllib.parse.unquote(path_attr)
-                        # If path is relative, join with collection_path
                         if not os.path.isabs(p):
-                            p = os.path.join(collection_path, p)
-                        cover_path = p
+                            p = os.path.join(os.path.dirname(nml_path), p)
+                        cover_path = p if os.path.exists(p) else path_attr
                     except Exception:
                         cover_path = path_attr
-                else:
-                    cover_path = ''
             track['cover_path'] = cover_path
+            track['has_cover']   = has_cover
+            track['_cover_data'] = cover_data   # None when no embedded art
             
             # Extract CUEPOINT data for reference
             cuepoints = entry.findall('.//CUE_POINT')
@@ -1301,3 +1306,363 @@ def parse_traktor_collection(collection_path):
         return []
     
     return tracks
+
+
+# ─── NML playlist / folder management ───────────────────────────────────────
+
+def key_to_filepath(key):
+    """
+    Convert a Traktor NML PRIMARYKEY key string to a Windows file path.
+    Key format: "C:/:Users/:home/:Music/:folder/:filename.mp3"
+    """
+    if not key:
+        return ''
+    # Split on '/: ' which separates path components in Traktor format
+    parts = key.split('/:')
+    if not parts:
+        return key
+    volume = parts[0]          # e.g. "C:"
+    path_parts = [p for p in parts[1:] if p]
+    if path_parts:
+        return volume + '\\' + '\\'.join(path_parts)
+    return volume
+
+
+def _parse_playlist_node_children(subnodes_elem):
+    """Recursively parse SUBNODES XML element into a list of dicts."""
+    result = []
+    if subnodes_elem is None:
+        return result
+    for node in subnodes_elem.findall('NODE'):
+        node_type = node.get('TYPE', '')
+        node_name = node.get('NAME', '')
+        item = {'name': node_name, 'type': node_type, 'children': [], 'keys': []}
+        if node_type == 'FOLDER':
+            sub = node.find('SUBNODES')
+            item['children'] = _parse_playlist_node_children(sub)
+        elif node_type == 'PLAYLIST':
+            playlist_elem = node.find('PLAYLIST')
+            if playlist_elem is not None:
+                for entry in playlist_elem.findall('ENTRY'):
+                    pk = entry.find('PRIMARYKEY')
+                    if pk is not None:
+                        k = pk.get('KEY', '')
+                        if k:
+                            item['keys'].append(k)
+        result.append(item)
+    return result
+
+
+def parse_traktor_playlists(nml_path):
+    """
+    Parse Traktor NML playlist/folder tree structure.
+
+    Args:
+        nml_path (str): Direct path to the .nml file
+
+    Returns:
+        list: Nested list of dicts with 'name', 'type', 'children', 'keys'
+    """
+    if not os.path.exists(nml_path):
+        return []
+    try:
+        tree = ET.parse(nml_path)
+        root = tree.getroot()
+        playlists_root = root.find('.//PLAYLISTS')
+        if playlists_root is None:
+            return []
+        root_node = playlists_root.find('NODE')
+        if root_node is None:
+            return []
+        subnodes = root_node.find('SUBNODES')
+        return _parse_playlist_node_children(subnodes)
+    except Exception as e:
+        print(f"Error parsing playlists: {e}")
+        return []
+
+
+def update_track_field_in_nml(nml_path, filepath, field_name, value):
+    """
+    Update a single metadata field for a track directly in the NML file.
+
+    Args:
+        nml_path  (str): Path to the NML file to modify (will be overwritten)
+        filepath  (str): File path of the track (as reconstructed by parse_traktor_collection)
+        field_name(str): Column / field name (title, artist, bpm, key, etc.)
+        value     (str): New value
+
+    Returns:
+        bool: True if successful
+    """
+    import urllib.parse
+
+    # Mapping: field_name -> (sub_element_tag_or_None, xml_attribute_name)
+    FIELD_MAP = {
+        'title':         (None,    'TITLE'),
+        'title_user':    (None,    'TITLE_USER'),    # original text typed by user (display value)
+        'artist':        (None,    'ARTIST'),
+        'artist_user':   (None,    'ARTIST_USER'),   # original text typed by user (display value)
+        'remixer':       (None,    'REMIXER'),
+        'producer':      (None,    'PRODUCER'),
+        'album':         (None,    'ALBUM'),
+        'genre':         (None,    'GENRE'),
+        'label':         (None,    'LABEL'),
+        'catalogno':     (None,    'CATALOGNO'),
+        'release_date':  (None,    'RELEASE_DATE'),
+        'track_number':  (None,    'TRACK'),
+        'rating':        (None,    'RATING'),
+        'mix':           (None,    'MIX'),
+        'comment':       (None,    'COMMENT'),
+        'comment_user':  (None,    'COMMENT_USER'),  # original text typed by user (display value)
+        'lyrics':        (None,    'LYRICS'),
+        'bpm':           ('TEMPO', 'BPM'),
+        'key':           ('KEY',   'VALUE'),
+        'key_text':      ('KEY',   'TEXT'),
+        'autogain':      ('INFO',  'AUTOGAIN'),
+    }
+
+    if field_name not in FIELD_MAP:
+        return False  # Read-only or unknown field
+
+    try:
+        tree = ET.parse(nml_path)
+        root = tree.getroot()
+
+        normalized_target = os.path.normcase(filepath.strip())
+        target_entry = None
+
+        for entry in root.findall('.//ENTRY'):
+            loc_elem = entry.find('LOCATION')
+            if loc_elem is None:
+                continue
+            volume   = loc_elem.get('VOLUME', '')
+            dir_attr = loc_elem.get('DIR', '')
+            file_attr = loc_elem.get('FILE', '')
+
+            parts = []
+            vol = volume.strip()
+            if vol:
+                parts.append(vol)
+            if dir_attr:
+                d = dir_attr.strip('/').replace('/', '\\').replace(':', '')
+                if d:
+                    parts.append(d)
+            if file_attr:
+                parts.append(file_attr.strip())
+
+            entry_path = '\\'.join(parts).replace('\\\\', '\\')
+            if os.path.normcase(entry_path) == normalized_target:
+                target_entry = entry
+                break
+
+        if target_entry is None:
+            print(f"Entry not found in NML: {filepath}")
+            return False
+
+        elem_tag, attr_name = FIELD_MAP[field_name]
+        if elem_tag is None:
+            target_entry.set(attr_name, str(value))
+        else:
+            sub_elem = target_entry.find(elem_tag)
+            if sub_elem is None:
+                sub_elem = ET.SubElement(target_entry, elem_tag)
+            sub_elem.set(attr_name, str(value))
+
+        tree.write(nml_path, encoding='UTF-8', xml_declaration=True)
+        return True
+
+    except Exception as e:
+        print(f"Error updating NML field: {e}")
+        return False
+
+
+def add_playlist_to_nml(nml_path, parent_name_path, playlist_name):
+    """
+    Add a new empty playlist to the Traktor NML playlist tree.
+
+    Args:
+        nml_path        (str) : Path to the NML file
+        parent_name_path(list): List of folder names leading to the parent
+                                (empty list = add at root level)
+        playlist_name   (str) : Name of the new playlist
+
+    Returns:
+        bool: True if successful
+    """
+    import uuid as _uuid
+    try:
+        tree = ET.parse(nml_path)
+        root = tree.getroot()
+        playlists_root = root.find('.//PLAYLISTS')
+        if playlists_root is None:
+            return False
+        root_node = playlists_root.find('NODE')
+        if root_node is None:
+            return False
+
+        parent_subnodes = root_node.find('SUBNODES')
+        if parent_subnodes is None:
+            parent_subnodes = ET.SubElement(root_node, 'SUBNODES')
+            parent_subnodes.set('COUNT', '0')
+
+        for folder_name in parent_name_path:
+            found = None
+            for node in parent_subnodes.findall('NODE'):
+                if node.get('NAME') == folder_name and node.get('TYPE') == 'FOLDER':
+                    found = node
+                    break
+            if found is None:
+                return False
+            parent_subnodes = found.find('SUBNODES')
+            if parent_subnodes is None:
+                parent_subnodes = ET.SubElement(found, 'SUBNODES')
+                parent_subnodes.set('COUNT', '0')
+
+        new_node = ET.SubElement(parent_subnodes, 'NODE')
+        new_node.set('TYPE', 'PLAYLIST')
+        new_node.set('NAME', playlist_name)
+        pl_elem = ET.SubElement(new_node, 'PLAYLIST')
+        pl_elem.set('ENTRIES', '0')
+        pl_elem.set('TYPE', 'LIST')
+        pl_elem.set('UUID', str(_uuid.uuid4()).replace('-', ''))
+
+        parent_subnodes.set('COUNT', str(len(parent_subnodes.findall('NODE'))))
+        tree.write(nml_path, encoding='UTF-8', xml_declaration=True)
+        return True
+    except Exception as e:
+        print(f"Error adding playlist: {e}")
+        return False
+
+
+def add_folder_to_nml(nml_path, parent_name_path, folder_name):
+    """
+    Add a new folder node to the Traktor NML playlist tree.
+
+    Args:
+        nml_path        (str) : Path to the NML file
+        parent_name_path(list): List of folder names leading to the parent
+        folder_name     (str) : Name of the new folder
+
+    Returns:
+        bool: True if successful
+    """
+    try:
+        tree = ET.parse(nml_path)
+        root = tree.getroot()
+        playlists_root = root.find('.//PLAYLISTS')
+        if playlists_root is None:
+            return False
+        root_node = playlists_root.find('NODE')
+        if root_node is None:
+            return False
+
+        parent_subnodes = root_node.find('SUBNODES')
+        if parent_subnodes is None:
+            parent_subnodes = ET.SubElement(root_node, 'SUBNODES')
+            parent_subnodes.set('COUNT', '0')
+
+        for fn in parent_name_path:
+            found = None
+            for node in parent_subnodes.findall('NODE'):
+                if node.get('NAME') == fn and node.get('TYPE') == 'FOLDER':
+                    found = node
+                    break
+            if found is None:
+                return False
+            parent_subnodes = found.find('SUBNODES')
+            if parent_subnodes is None:
+                parent_subnodes = ET.SubElement(found, 'SUBNODES')
+                parent_subnodes.set('COUNT', '0')
+
+        new_node = ET.SubElement(parent_subnodes, 'NODE')
+        new_node.set('TYPE', 'FOLDER')
+        new_node.set('NAME', folder_name)
+        subs = ET.SubElement(new_node, 'SUBNODES')
+        subs.set('COUNT', '0')
+
+        parent_subnodes.set('COUNT', str(len(parent_subnodes.findall('NODE'))))
+        tree.write(nml_path, encoding='UTF-8', xml_declaration=True)
+        return True
+    except Exception as e:
+        print(f"Error adding folder: {e}")
+        return False
+
+
+def delete_node_from_nml(nml_path, node_name_path, node_type):
+    """
+    Delete a playlist or folder node from the Traktor NML playlist tree.
+
+    Args:
+        nml_path      (str) : Path to the NML file
+        node_name_path(list): Ordered list of names from root to the node to delete
+        node_type     (str) : 'PLAYLIST' or 'FOLDER'
+
+    Returns:
+        bool: True if the node was found and removed
+    """
+    try:
+        tree = ET.parse(nml_path)
+        root = tree.getroot()
+        playlists_root = root.find('.//PLAYLISTS')
+        if playlists_root is None:
+            return False
+        root_node = playlists_root.find('NODE')
+        if root_node is None:
+            return False
+
+        parent_subnodes = root_node.find('SUBNODES')
+        if parent_subnodes is None:
+            return False
+
+        # Navigate to the parent of the target node
+        for fn in node_name_path[:-1]:
+            found = None
+            for node in parent_subnodes.findall('NODE'):
+                if node.get('NAME') == fn and node.get('TYPE') == 'FOLDER':
+                    found = node
+                    break
+            if found is None:
+                return False
+            parent_subnodes = found.find('SUBNODES')
+            if parent_subnodes is None:
+                return False
+
+        target_name = node_name_path[-1]
+        for node in list(parent_subnodes.findall('NODE')):
+            if node.get('NAME') == target_name and node.get('TYPE') == node_type:
+                parent_subnodes.remove(node)
+                parent_subnodes.set('COUNT', str(len(parent_subnodes.findall('NODE'))))
+                tree.write(nml_path, encoding='UTF-8', xml_declaration=True)
+                return True
+        return False
+    except Exception as e:
+        print(f"Error deleting node: {e}")
+        return False
+
+
+def save_collection_nml_path(path):
+    """Persist the chosen NML file path to the config file."""
+    try:
+        config = {}
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, 'r') as f:
+                config = json.load(f)
+        config['collection_nml_path'] = path
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(config, f)
+        return True
+    except Exception as e:
+        print(f"Error saving NML path: {e}")
+        return False
+
+
+def load_collection_nml_path():
+    """Load the previously chosen NML file path from the config file."""
+    try:
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, 'r') as f:
+                config = json.load(f)
+                return config.get('collection_nml_path')
+    except Exception as e:
+        print(f"Error loading NML path: {e}")
+    return None

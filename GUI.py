@@ -2,6 +2,9 @@ import os
 import sys
 import re
 import io
+import json
+import shutil
+from datetime import datetime
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import threading
@@ -24,7 +27,13 @@ _FOREST_DARK_TCL  = os.path.join(_THEME_DIR, "forest-dark.tcl")
 _forest_theme_available = os.path.isfile(_FOREST_LIGHT_TCL) and os.path.isfile(_FOREST_DARK_TCL)
 
 # Import required modules
-from audio_analyzer import AudioAnalyzer, TraktorNMLEditor, find_duplicate_songs, load_collection_path, save_collection_path, parse_traktor_collection
+from audio_analyzer import (
+    AudioAnalyzer, TraktorNMLEditor, find_duplicate_songs,
+    load_collection_path, save_collection_path, parse_traktor_collection,
+    key_to_filepath, parse_traktor_playlists, update_track_field_in_nml,
+    add_playlist_to_nml, add_folder_to_nml, delete_node_from_nml,
+    save_collection_nml_path, load_collection_nml_path,
+)
 
 # Optional: VLC-based playback support (python-vlc)
 try:
@@ -381,6 +390,12 @@ class AudioAnalyzerGUI:
         # Store parsed collection tracks and cover image refs
         self.collection_tracks = {}
         self._cover_images = {}
+
+        # Collection (NML) mode state
+        self._collection_nml_path = None          # Active NML file
+        self._collection_nml_backed_up = False    # True once original is backed-up this session
+        self.collection_playlist_tree = None      # Treeview widget in right pane
+        self._collection_tracks_nc = {}           # Normcase lookup for case-insensitive matching
         
         # Order My Music mode variables
         self.order_music_files = {}  # Store file data for order_music mode
@@ -1168,8 +1183,12 @@ class AudioAnalyzerGUI:
         # If cover column clicked, show cover popup if available
         if column_name == "cover":
             filepath = self.tree.set(item, "filepath")
-            track = self.collection_tracks.get(filepath, {})
-            cover_path = track.get('cover_path') if track else None
+            track    = (
+                self.collection_tracks.get(filepath)
+                or self._collection_tracks_nc.get(os.path.normcase(filepath))
+                or {}
+            )
+            cover_path = self._decode_cover_on_demand(track)
             if cover_path:
                 self._show_cover_popup(cover_path)
             else:
@@ -1181,6 +1200,12 @@ class AudioAnalyzerGUI:
             readonly_columns = ['length', 'type', 'size_mb', 'bitrate', 'filepath', 'has_cover']
             if column_name in readonly_columns:
                 return  # Don't allow editing these columns
+
+        # In collection mode, prevent editing hardware/computed columns
+        if self.current_mode == 'collection':
+            readonly_columns = ['filepath', 'bitrate', 'length', 'autogain', 'cover']
+            if column_name in readonly_columns:
+                return
         
         # Get current value
         current_value = self.tree.set(item, column_name)
@@ -1258,6 +1283,10 @@ class AudioAnalyzerGUI:
                     # For other tags, save to file
                     self._save_order_music_tag(file_path, column_name, entry.get())
                     self.order_music_files[file_path][column_name] = entry.get()
+
+            # In collection mode, save the edited field back to the NML file
+            if self.current_mode == 'collection':
+                self._save_collection_nml_field(file_path, column_name, entry.get())
             
             # Destroy the entry widget
             entry.destroy()
@@ -3293,121 +3322,96 @@ class AudioAnalyzerGUI:
         )
 
     def analyze_collection(self):
-        """Load and display Traktor collection."""
-        # First, try to load saved collection path
-        collection_path = load_collection_path()
-        
-        if collection_path and os.path.exists(collection_path):
-            # Ask if user wants to use saved path or browse for new one
+        """Load and display Traktor collection (NML).
+        Prompts user to choose a .nml file, then shows the playlist/folder tree
+        in the right pane and waits for the user to select a playlist.
+        """
+        saved_nml = load_collection_nml_path()
+
+        if saved_nml and os.path.exists(saved_nml):
             use_saved = messagebox.askyesno(
-                "Collection Path",
-                f"Use previously saved collection path?\n\n{collection_path}"
+                "Traktor Collection",
+                f"Use previously loaded collection?\n\n{saved_nml}\n\nClick No to choose a different file."
             )
             if not use_saved:
-                collection_path = filedialog.askdirectory(title="Select Traktor Collection folder")
-        else:
-            # Prompt user to select collection folder
-            collection_path = filedialog.askdirectory(title="Select Traktor Collection folder")
-        
-        if not collection_path:
-            return
+                saved_nml = None
+
+        if not saved_nml:
+            saved_nml = filedialog.askopenfilename(
+                title="Select Traktor collection.nml",
+                filetypes=[("Traktor NML", "*.nml"), ("All files", "*.*")],
+                initialfile="collection.nml",
+            )
+            if not saved_nml:
+                return
+
+        self._collection_nml_path = saved_nml
+        self._collection_nml_backed_up = False
+        save_collection_nml_path(saved_nml)
+
         self._set_active_button(self.collection_button)
-        
-        # Save the collection path
-        save_collection_path(collection_path)
-        
-        # Start collection parsing in a separate thread
-        threading.Thread(target=self._analyze_collection_thread, args=(collection_path,), daemon=True).start()
-    
-    def _analyze_collection_thread(self, collection_path):
-        """Thread function to parse collection without blocking the GUI"""
+        threading.Thread(target=self._analyze_collection_thread, args=(saved_nml,), daemon=True).start()
+
+    def _analyze_collection_thread(self, nml_path):
+        """Two-phase loader.
+        Phase A (instant): parse playlists only → show tree so user can browse immediately.
+        Phase B (background): parse all track metadata → index in memory for playlist display.
+        """
         try:
             try:
-                self.start_feedback("Analyzing collection")
+                self.start_feedback("Loading collection")
             except Exception:
                 pass
-            self.status_var.set(f"Loading Traktor collection from: {collection_path}")
             self.progress_var.set(0)
-            
-            # Switch to collection mode columns (do this in main thread)
-            self.root.after(0, lambda: (setattr(self, 'current_mode', 'collection'), self._setup_collection_columns(), self._hide_folder_pane()))
-            
-            # Clear the table instantly
-            _ch = self.tree.get_children()
-            if _ch: self.tree.delete(*_ch)
 
-            self.status_var.set("Parsing collection.nml...")
-            
-            # Parse collection
-            tracks = parse_traktor_collection(collection_path)
-            
+            # ── Phase A: switch mode + show playlist tree RIGHT NOW ───────────────
+            def _phase_a():
+                setattr(self, 'current_mode', 'collection')
+                self._setup_collection_columns()
+                # Clear the main table
+                _ch = self.tree.get_children()
+                if _ch:
+                    self.tree.delete(*_ch)
+                self._show_collection_pane()   # parses playlists + populates tree (fast)
+                self.status_var.set(
+                    f"Playlists loaded — select a playlist ⏳ (tracks indexing in background…)"
+                )
+            self.root.after(0, _phase_a)
+
+            # Reset track index
+            self.collection_tracks     = {}
+            self._collection_tracks_nc = {}
+
+            # ── Phase B: parse every ENTRY in the NML (runs in this bg thread) ────
+            tracks = parse_traktor_collection(nml_path)
+
             if not tracks:
-                self.status_var.set("No tracks found in collection or error parsing collection.nml")
+                self.status_var.set("No tracks found or error parsing collection.nml")
                 try:
                     self.stop_feedback("No tracks")
                 except Exception:
                     pass
-                messagebox.showwarning("No Tracks", "Could not parse collection or no tracks found.")
+                messagebox.showwarning("No Tracks", "Could not parse the collection or no tracks were found.")
                 return
-            
-            # Display tracks in treeview
+
             for i, track in enumerate(tracks):
                 if self._stop_flag.is_set():
-                    _ch = self.tree.get_children()
-                    if _ch: self.root.after(0, self.tree.delete, *_ch)
                     return
-                filepath = track.get('filepath', '')
-                # Store track metadata for later use (cover popup, etc.)
-                try:
-                    self.collection_tracks[filepath] = track
-                except Exception:
-                    pass
+                fp = track.get('filepath', '')
+                self.collection_tracks[fp] = track
+                self._collection_tracks_nc[os.path.normcase(fp)] = track
+                if i % 500 == 0:
+                    self.progress_var.set((i / len(tracks)) * 100)
 
-                cover_indicator = '🖼️' if track.get('cover_path') else ''
-
-                self.tree.insert(
-                    "",
-                    tk.END,
-                    values=(
-                        filepath,
-                        track.get('title', ''),
-                        track.get('artist', ''),
-                        track.get('remixer', ''),
-                        track.get('producer', ''),
-                        track.get('album', ''),
-                        track.get('genre', ''),
-                        track.get('label', ''),
-                        track.get('catalogno', ''),
-                        track.get('release_date', ''),
-                        track.get('track_number', ''),
-                        track.get('bpm', ''),
-                        track.get('key', ''),
-                        track.get('key_text', ''),
-                        track.get('bitrate', ''),
-                        track.get('length', ''),
-                        track.get('autogain', ''),
-                        track.get('rating', ''),
-                        track.get('mix', ''),
-                        track.get('comment', ''),
-                        track.get('lyrics', ''),
-                        cover_indicator
-                    )
-                )
-                # Update progress
-                self.progress_var.set((i / len(tracks)) * 100)
-                self.root.update_idletasks()
-                if self._stop_flag.is_set():
-                    _ch = self.tree.get_children()
-                    if _ch: self.root.after(0, self.tree.delete, *_ch)
-                    return
-
-            self.status_var.set(f"Loaded {len(tracks)} tracks from Traktor collection.")
             self.progress_var.set(100)
+            self.status_var.set(
+                f"✓ {len(tracks)} tracks indexed — select a playlist to view its tracks"
+            )
             try:
-                self.stop_feedback(f"Loaded {len(tracks)} tracks")
+                self.stop_feedback(f"{len(tracks)} tracks ready")
             except Exception:
                 pass
-            
+
         except Exception as e:
             self.status_var.set(f"Error: {str(e)}")
             messagebox.showerror("Error", f"Error loading collection: {str(e)}")
@@ -3416,12 +3420,449 @@ class AudioAnalyzerGUI:
         """Handle column header clicks for sorting in collection mode."""
         if self.current_mode != 'collection':
             return
-        
+        region = self.tree.identify_region(event.x, event.y)
+        if region != "heading":
+            return
+        col = self.tree.identify_column(event.x)
+        if not col:
+            return
+        col_idx = int(col[1:]) - 1
+        col_name = self.tree["columns"][col_idx]
+        rows = [(self.tree.set(r, col_name), r) for r in self.tree.get_children('')]
+        reverse = getattr(self, 'sort_reverse', False)
+        if getattr(self, 'sort_column', None) == col_name:
+            reverse = not reverse
+        else:
+            reverse = False
+        rows.sort(key=lambda x: x[0].lower() if isinstance(x[0], str) else x[0], reverse=reverse)
+        for idx, (_, row) in enumerate(rows):
+            self.tree.move(row, '', idx)
+        self.sort_column = col_name
+        self.sort_reverse = reverse
 
-    # (load_more feature removed)
-        
-        # Get the column that was clicked
-        
+    # ================== Collection Pane (Playlist / Folder Tree) ==================
+
+    def _show_collection_pane(self):
+        """Show the right pane containing the playlist/folder tree."""
+        try:
+            if str(self.folder_frame) not in self.paned_window.panes():
+                self.paned_window.add(self.folder_frame, weight=1)
+            self._setup_collection_playlist_tree()
+            self.paned_window.update_idletasks()
+            self.root.update_idletasks()
+            try:
+                total_width = self.paned_window.winfo_width()
+                if total_width > 400:
+                    self.paned_window.sashpos(0, total_width - 290)
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"Error showing collection pane: {e}")
+
+    def _setup_collection_playlist_tree(self):
+        """Build the playlist/folder tree widget inside folder_frame."""
+        for widget in self.folder_frame.winfo_children():
+            widget.destroy()
+        self.collection_playlist_tree = None
+
+        ttk.Label(
+            self.folder_frame,
+            text="📋  Playlists & Folders",
+            font=("Segoe UI", 11, "bold"),
+        ).pack(fill=tk.X, padx=6, pady=(6, 2))
+
+        # Button row: New Folder / New Playlist
+        btn_frame = ttk.Frame(self.folder_frame)
+        btn_frame.pack(fill=tk.X, padx=6, pady=(0, 4))
+        ttk.Button(btn_frame, text="📁 New Folder",  command=self._collection_add_folder_root,  width=14).pack(side=tk.LEFT, padx=(0, 3))
+        ttk.Button(btn_frame, text="➕ New Playlist", command=self._collection_add_playlist_root, width=14).pack(side=tk.LEFT)
+
+        # "Show All Tracks" shortcut
+        ttk.Button(
+            self.folder_frame,
+            text="🎵  Show All Tracks",
+            command=self._collection_show_all_tracks,
+        ).pack(fill=tk.X, padx=6, pady=(0, 4))
+
+        # Scrollbar + Treeview
+        tree_scroll = ttk.Scrollbar(self.folder_frame, orient="vertical")
+        tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        style = ttk.Style()
+        style.configure("CollectionPL.Treeview", font=("Segoe UI", 11), rowheight=24)
+        self.collection_playlist_tree = ttk.Treeview(
+            self.folder_frame,
+            show="tree",
+            selectmode="browse",
+            yscrollcommand=tree_scroll.set,
+            style="CollectionPL.Treeview",
+        )
+        self.collection_playlist_tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0, 6))
+        tree_scroll.config(command=self.collection_playlist_tree.yview)
+
+        self.collection_playlist_tree.bind("<<TreeviewSelect>>", self._on_collection_playlist_select)
+        self.collection_playlist_tree.bind("<Button-3>", self._on_collection_playlist_right_click)
+
+        self._populate_collection_playlist_tree()
+
+    def _populate_collection_playlist_tree(self):
+        """Fill the playlist/folder treeview from the loaded NML file."""
+        if not self.collection_playlist_tree:
+            return
+        for item in self.collection_playlist_tree.get_children():
+            self.collection_playlist_tree.delete(item)
+
+        if not self._collection_nml_path:
+            return
+
+        nodes = parse_traktor_playlists(self._collection_nml_path)
+
+        def insert_nodes(parent_id, node_list, name_path):
+            for node in node_list:
+                ntype = node['type']
+                name  = node['name']
+                icon  = "📁" if ntype == 'FOLDER' else "📋"
+                count = f" ({len(node['keys'])})" if ntype == 'PLAYLIST' else ""
+                label = f"{icon}  {name}{count}"
+                current_path = name_path + [name]
+                item_id = self.collection_playlist_tree.insert(
+                    parent_id, tk.END,
+                    text=label,
+                    values=(ntype, json.dumps(current_path), json.dumps(node.get('keys', []))),
+                    open=(ntype == 'FOLDER'),
+                )
+                if ntype == 'FOLDER' and node.get('children'):
+                    insert_nodes(item_id, node['children'], current_path)
+
+        insert_nodes("", nodes, [])
+
+    def _on_collection_playlist_select(self, event):
+        """Load tracks for the selected playlist into the main treeview."""
+        sel = self.collection_playlist_tree.selection() if self.collection_playlist_tree else []
+        if not sel:
+            return
+        item = sel[0]
+        values = self.collection_playlist_tree.item(item, "values")
+        if not values or len(values) < 3:
+            return
+        ntype = values[0]
+        if ntype != 'PLAYLIST':
+            return  # Clicking a folder does nothing
+        try:
+            name_path = json.loads(values[1])
+            keys      = json.loads(values[2])
+        except Exception:
+            return
+        playlist_name = name_path[-1] if name_path else "Playlist"
+        self._collection_load_playlist_tracks(keys, playlist_name)
+
+    def _collection_load_playlist_tracks(self, keys, playlist_name):
+        """Populate the main treeview with the tracks belonging to a playlist."""
+        # Clear table
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        if not keys:
+            self.status_var.set(f"Playlist '{playlist_name}' is empty.")
+            return
+
+        # Guard: if tracks haven't been indexed yet, retry after a short delay
+        if not self.collection_tracks and keys:
+            self.status_var.set("⏳ Tracks still indexing — please wait a moment…")
+            self.root.after(800, lambda k=keys, n=playlist_name: self._collection_load_playlist_tracks(k, n))
+            return
+
+        inserted = 0
+        for key in keys:
+            fp    = key_to_filepath(key)
+            track = self.collection_tracks.get(fp)
+            if track is None:
+                track = self._collection_tracks_nc.get(os.path.normcase(fp))
+
+            if track:
+                cover_indicator = "🖼️" if track.get("has_cover") else ""
+                self.tree.insert("", tk.END, values=(
+                    track.get("filepath", fp),
+                    track.get("title", ""),
+                    track.get("artist", ""),
+                    track.get("remixer", ""),
+                    track.get("producer", ""),
+                    track.get("album", ""),
+                    track.get("genre", ""),
+                    track.get("label", ""),
+                    track.get("catalogno", ""),
+                    track.get("release_date", ""),
+                    track.get("track_number", ""),
+                    track.get("bpm", ""),
+                    track.get("key", ""),
+                    track.get("key_text", ""),
+                    track.get("bitrate", ""),
+                    track.get("length", ""),
+                    track.get("autogain", ""),
+                    track.get("rating", ""),
+                    track.get("mix", ""),
+                    track.get("comment", ""),
+                    track.get("lyrics", ""),
+                    cover_indicator,
+                ))
+            else:
+                # Track key points to a file not in COLLECTION — show filepath only
+                empty = ("",) * 21
+                self.tree.insert("", tk.END, values=(fp,) + empty)
+            inserted += 1
+
+        self.status_var.set(f"📋 {playlist_name}  —  {inserted} track(s)")
+
+    def _collection_show_all_tracks(self):
+        """Show every track in the collection (no playlist filter)."""
+        if not self.collection_tracks:
+            self.status_var.set("⏳ Tracks still indexing — please wait a moment…")
+            self.root.after(800, self._collection_show_all_tracks)
+            return
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        for fp, track in self.collection_tracks.items():
+            cover_indicator = "🖼️" if track.get("has_cover") else ""
+            self.tree.insert("", tk.END, values=(
+                track.get("filepath", fp),
+                track.get("title", ""),
+                track.get("artist", ""),
+                track.get("remixer", ""),
+                track.get("producer", ""),
+                track.get("album", ""),
+                track.get("genre", ""),
+                track.get("label", ""),
+                track.get("catalogno", ""),
+                track.get("release_date", ""),
+                track.get("track_number", ""),
+                track.get("bpm", ""),
+                track.get("key", ""),
+                track.get("key_text", ""),
+                track.get("bitrate", ""),
+                track.get("length", ""),
+                track.get("autogain", ""),
+                track.get("rating", ""),
+                track.get("mix", ""),
+                track.get("comment", ""),
+                track.get("lyrics", ""),
+                cover_indicator,
+            ))
+        self.status_var.set(f"🎵 All Tracks  —  {len(self.collection_tracks)} track(s)")
+
+    # ── NML save helper ──────────────────────────────────────────────────────────
+
+    def _reverse_hebrew_words(self, text: str) -> str:
+        """Reverse only Hebrew words in a string; numbers/Latin/punctuation stay unchanged.
+
+        Example: 'DJ שלום Mix 2'  ->  'DJ םולש Mix 2'
+        """
+        tokens = re.findall(r'[\u05D0-\u05EA]+|[^\u05D0-\u05EA]+', text)
+        return ''.join(t[::-1] if re.fullmatch(r'[\u05D0-\u05EA]+', t) else t for t in tokens)
+
+    # Fields that get dual Hebrew storage.
+    # NML standard attr  = reversed Hebrew  (what Traktor displays)
+    # NML _USER attr     = original text    (what "My Collection" displays; also persisted)
+    _DUAL_FIELDS = {'title', 'artist', 'comment'}
+
+    def _save_collection_nml_field(self, filepath, col_name, value):
+        """Write one edited field back to the NML file (backup on first write).
+
+        For title / artist / comment the storage is:
+        ┌─────────────────┬──────────────────────────────────────────┐
+        │ NML TITLE       │ Hebrew-reversed  (what Traktor shows)   │
+        │ NML TITLE_USER  │ Original text typed by user ──────────┤ ← screen
+        └─────────────────┴──────────────────────────────────────────┘
+        On every restart parse_traktor_collection() reads TITLE_USER first, so the
+        program always shows the user's original text regardless of what Traktor does.
+        """
+        if not self._collection_nml_path or not os.path.exists(self._collection_nml_path):
+            messagebox.showerror("Error", "Collection NML file not found.")
+            return False
+
+        # ── Backup on first write this session ───────────────────────────────────
+        if not self._collection_nml_backed_up:
+            try:
+                ts          = datetime.now().strftime("%Y%m%d_%H%M%S")
+                nml_dir     = os.path.dirname(self._collection_nml_path)
+                nml_stem    = os.path.splitext(os.path.basename(self._collection_nml_path))[0]
+                backup_path = os.path.join(nml_dir, f"{nml_stem}_old_{ts}.nml")
+                shutil.copy2(self._collection_nml_path, backup_path)
+                self._collection_nml_backed_up = True
+                print(f"NML backup created: {backup_path}")
+            except Exception as e:
+                messagebox.showerror("Backup Error", f"Could not create NML backup:\n{e}")
+                return False
+
+        # ── Detect Hebrew in dual-storage fields only ────────────────────────────
+        is_dual    = col_name in self._DUAL_FIELDS
+        has_hebrew = is_dual and bool(re.search(r'[\u05D0-\u05EA]', value))
+        user_col   = col_name + '_user'            # e.g. 'title_user'
+
+        if has_hebrew:
+            # TITLE  → reversed Hebrew  (Traktor sees this)
+            # TITLE_USER → original text  (our app reads this on reload)
+            reversed_val = self._reverse_hebrew_words(value)
+            ok1 = update_track_field_in_nml(
+                self._collection_nml_path, filepath, col_name, reversed_val
+            )
+            ok2 = update_track_field_in_nml(
+                self._collection_nml_path, filepath, user_col, value
+            )
+            ok = ok1 and ok2
+            print(f"Dual-save: {col_name}='{reversed_val}'  {user_col}='{value}'")
+            status_msg = f"Saved: {col_name} (Traktor sees reversed, screen shows original)"
+        else:
+            # Plain text — write as-is; also keep _USER in sync so reload stays correct
+            ok = update_track_field_in_nml(
+                self._collection_nml_path, filepath, col_name, value
+            )
+            if ok and is_dual:
+                update_track_field_in_nml(
+                    self._collection_nml_path, filepath, user_col, value
+                )
+            status_msg = f"Saved: {col_name}"
+
+        # ── Update in-memory cache with the DISPLAY value (original text) ────────
+        if ok:
+            for store in (self.collection_tracks, self._collection_tracks_nc):
+                t = store.get(filepath) or store.get(os.path.normcase(filepath))
+                if t is not None:
+                    t[col_name] = value          # screen always shows original text
+                    if is_dual:
+                        t[user_col] = value      # keep _user key in sync
+            self.status_var.set(status_msg)
+        else:
+            messagebox.showwarning(
+                "Save Warning",
+                f"Could not find track in NML:\n{os.path.basename(filepath)}\n\n"
+                f"Field '{col_name}' was NOT saved.",
+            )
+        return ok
+
+    # ── Playlist / Folder add & delete ──────────────────────────────────────────
+
+    def _collection_add_folder_root(self):
+        """Add a new folder at the root level of the playlist tree."""
+        self._collection_add_folder(parent_name_path=[])
+
+    def _collection_add_playlist_root(self):
+        """Add a new playlist at the root level of the playlist tree."""
+        self._collection_add_playlist(parent_name_path=[])
+
+    def _collection_add_folder(self, parent_name_path=None):
+        """Prompt for a name and add a folder to the playlist tree."""
+        if parent_name_path is None:
+            parent_name_path = []
+        from tkinter import simpledialog
+        name = simpledialog.askstring(
+            "New Folder",
+            f"Enter folder name" + (f" inside '{parent_name_path[-1]}'" if parent_name_path else " (root level)") + ":",
+            parent=self.root,
+        )
+        if not name or not name.strip():
+            return
+        if not self._collection_nml_path:
+            return
+        ok = add_folder_to_nml(self._collection_nml_path, parent_name_path, name.strip())
+        if ok:
+            self._populate_collection_playlist_tree()
+            self.status_var.set(f"Folder '{name.strip()}' added.")
+        else:
+            messagebox.showerror("Error", f"Could not add folder '{name.strip()}'.")
+
+    def _collection_add_playlist(self, parent_name_path=None):
+        """Prompt for a name and add an empty playlist to the tree."""
+        if parent_name_path is None:
+            parent_name_path = []
+        from tkinter import simpledialog
+        name = simpledialog.askstring(
+            "New Playlist",
+            f"Enter playlist name" + (f" inside '{parent_name_path[-1]}'" if parent_name_path else " (root level)") + ":",
+            parent=self.root,
+        )
+        if not name or not name.strip():
+            return
+        if not self._collection_nml_path:
+            return
+        ok = add_playlist_to_nml(self._collection_nml_path, parent_name_path, name.strip())
+        if ok:
+            self._populate_collection_playlist_tree()
+            self.status_var.set(f"Playlist '{name.strip()}' added.")
+        else:
+            messagebox.showerror("Error", f"Could not add playlist '{name.strip()}'.")
+
+    def _collection_delete_node(self, name_path, node_type):
+        """Delete a playlist or folder node after confirmation."""
+        node_name = name_path[-1] if name_path else "?"
+        label = "playlist" if node_type == "PLAYLIST" else "folder"
+        if not messagebox.askyesno(
+            f"Delete {label.capitalize()}",
+            f"Delete {label} '{node_name}'?\n\nThis removes it from the NML only — audio files are unaffected.",
+        ):
+            return
+        if not self._collection_nml_path:
+            return
+        ok = delete_node_from_nml(self._collection_nml_path, name_path, node_type)
+        if ok:
+            # Clear main table if the deleted playlist was being shown
+            for child in self.tree.get_children():
+                self.tree.delete(child)
+            self._populate_collection_playlist_tree()
+            self.status_var.set(f"Deleted {label}: '{node_name}'")
+        else:
+            messagebox.showerror("Error", f"Could not delete {label} '{node_name}'.")
+
+    def _on_collection_playlist_right_click(self, event):
+        """Context menu on the playlist tree: add / delete folder or playlist."""
+        if not self.collection_playlist_tree:
+            return
+        item = self.collection_playlist_tree.identify_row(event.y)
+        menu = tk.Menu(self.root, tearoff=0)
+
+        if item:
+            self.collection_playlist_tree.selection_set(item)
+            values = self.collection_playlist_tree.item(item, "values")
+            if values and len(values) >= 2:
+                ntype = values[0]
+                try:
+                    name_path = json.loads(values[1])
+                except Exception:
+                    name_path = []
+
+                if ntype == 'FOLDER':
+                    menu.add_command(
+                        label="📁 New Sub-Folder here",
+                        command=lambda np=name_path: self._collection_add_folder(np),
+                    )
+                    menu.add_command(
+                        label="➕ New Playlist here",
+                        command=lambda np=name_path: self._collection_add_playlist(np),
+                    )
+                    menu.add_separator()
+                    menu.add_command(
+                        label="🗑  Delete Folder",
+                        command=lambda np=name_path: self._collection_delete_node(np, 'FOLDER'),
+                    )
+                elif ntype == 'PLAYLIST':
+                    parent_path = name_path[:-1]
+                    menu.add_command(
+                        label="➕ New Playlist in same folder",
+                        command=lambda pp=parent_path: self._collection_add_playlist(pp),
+                    )
+                    menu.add_separator()
+                    menu.add_command(
+                        label="🗑  Delete Playlist",
+                        command=lambda np=name_path: self._collection_delete_node(np, 'PLAYLIST'),
+                    )
+        else:
+            # Clicked on empty area
+            menu.add_command(label="📁 New Folder at root", command=self._collection_add_folder_root)
+            menu.add_command(label="➕ New Playlist at root", command=self._collection_add_playlist_root)
+
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
 
     def _open_in_explorer(self, path):
         """Open the given file path in the system file explorer and select it in the table."""
@@ -3915,6 +4356,43 @@ class AudioAnalyzerGUI:
             
         except Exception as e:
             self.root.after(0, lambda: self.status_var.set(f"Error saving cover: {e}"))
+
+    def _decode_cover_on_demand(self, track: dict):
+        """Return a file path to the cover image, decoding base64 lazily on first call.
+
+        Result is cached in track['cover_path'] so subsequent opens are instant.
+        Returns None when no cover art is available.
+        """
+        if not track:
+            return None
+        # Already decoded and file still exists?
+        existing = track.get('cover_path', '')
+        if existing and os.path.exists(existing):
+            return existing
+        # Try to decode raw base64 data stored during collection parse
+        raw = track.get('_cover_data')
+        if not raw:
+            return None
+        try:
+            import base64 as _b64
+            import tempfile as _tmp
+            m = re.match(r"data:(.*?);base64,(.*)", raw, re.DOTALL)
+            if m:
+                b64  = m.group(2).strip()
+                ext  = 'png' if 'png' in m.group(1) else 'jpg'
+            else:
+                b64  = raw.strip()
+                ext  = 'jpg'
+            decoded   = _b64.b64decode(b64)
+            safe_name = re.sub(r'[^0-9a-zA-Z_-]', '_', track.get('title', '')[:40]) or 'cover'
+            out_path  = os.path.join(_tmp.gettempdir(), f'{safe_name}.{ext}')
+            with open(out_path, 'wb') as f:
+                f.write(decoded)
+            track['cover_path'] = out_path   # cache for next time
+            return out_path
+        except Exception as e:
+            print(f"Cover decode error: {e}")
+            return None
 
     def _show_cover_popup(self, cover_path):
         """Show cover art in a popup window. Uses PIL if available."""
