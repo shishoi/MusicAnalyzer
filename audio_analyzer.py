@@ -1,4 +1,5 @@
 import os
+import re
 import librosa
 import numpy as np
 import matplotlib.pyplot as plt
@@ -396,99 +397,179 @@ class TraktorNMLEditor:
         print(f"Created backup at: {backup_path}")
         
         return backup_path
-    
-    def add_cue_points(self, audio_path, cue_points, cue_names=None):
+
+    # ── path-matching helpers ────────────────────────────────────────────────
+    @staticmethod
+    def _strip_invisible(text):
+        """Strip bidi / zero-width chars Windows injects around RTL filenames."""
+        if not text:
+            return text
+        for ch in ('\u200e', '\u200f', '\u202a', '\u202b', '\u202c',
+                   '\u202d', '\u202e', '\u2066', '\u2067', '\u2068', '\u2069',
+                   '\u200b', '\u200c', '\u200d', '\ufeff'):
+            text = text.replace(ch, '')
+        return text.strip()
+
+    @staticmethod
+    def _nml_location_to_path(volume, dir_str, filename):
+        """Reconstruct a Windows path from Traktor NML LOCATION attributes.
+
+        e.g.  VOLUME="C:"  DIR="/:Users/:home/:Music/:"  FILE="song.mp3"
+              → C:\\Users\\home\\Music\\song.mp3
         """
-        Add CUE points to a specific track
-        
+        parts = [p.lstrip(':') for p in dir_str.split('/') if p.lstrip(':')]
+        return volume + '\\' + '\\'.join(parts) + '\\' + filename
+
+    def add_cue_points(self, audio_path, cue_points, cue_names=None, hotcue_numbers=None):
+        """
+        Add hot CUE points (build=2, drop=3, outro=4) to a track in the NML.
+        Intro is never written.
+
+        Uses text-based injection to preserve Traktor's exact file format.
+        ET.write() re-serialises the whole file (self-closing tags, quote style,
+        whitespace) and Traktor silently discards nodes it didn't write itself.
+        Reading/writing as raw text avoids this — only the target ENTRY is touched.
+
         Args:
-            audio_path (str): Path to the audio file
-            cue_points (dict): Dictionary with CUE types and times in seconds
-            cue_names (dict, optional): Custom names for CUE points
-        
+            audio_path (str): Absolute path to the audio file on disk.
+            cue_points (dict): {'build': <sec>, 'drop': <sec>, 'outro': <sec>}
+            cue_names  (dict, optional): Ignored — kept for API compatibility.
+            hotcue_numbers (dict, optional): Override HOTCUE slot numbers.
+
         Returns:
-            bool: Whether the operation was successful
+            bool: True on success, False if entry not found or write error.
         """
-        # Back up before any changes
         self.backup_collection()
-        
+
         try:
-            # Read the file
+            if hotcue_numbers is None:
+                hotcue_numbers = {'build': 2, 'drop': 3, 'outro': 4}
+
+            _write_types = ('build', 'drop', 'outro')
+            target_slots = {str(hotcue_numbers[t]) for t in _write_types if t in hotcue_numbers}
+
+            # ── Step 1: use ET (read-only) to find the raw FILE= attribute value ──
+            # Strip bidi control chars so Hebrew/RTL filenames compare correctly.
+            clean_audio = self._strip_invisible(audio_path)
+            norm_target = os.path.normcase(os.path.normpath(clean_audio))
+            bare_target = self._strip_invisible(os.path.basename(audio_path)).lower()
+
             tree = ET.parse(self.nml_path)
             root = tree.getroot()
-            
-            # Find the specific file
-            audio_filename = os.path.basename(audio_path)
-            entry_found = False
-            
+
+            matched_file_attr = None  # raw FILE= value exactly as stored in XML
+
             for entry in root.findall(".//ENTRY"):
                 location = entry.find("LOCATION")
-                if location is not None:
-                    file = location.get("FILE")
-                    if file and file.lower() == audio_filename.lower():
-                        entry_found = True
-                        
-                        # Convert times to Traktor format (milliseconds)
-                        traktor_cues = {
-                            'intro': int(cue_points['intro'] * 1000),
-                            'build': int(cue_points['build'] * 1000),
-                            'drop': int(cue_points['drop'] * 1000),
-                            'outro': int(cue_points['outro'] * 1000)
-                        }
-                        
-                        # Default names if custom names not provided
-                        if cue_names is None:
-                            cue_names = {
-                                'intro': "Intro",
-                                'build': "Build",
-                                'drop': "Drop",
-                                'outro': "Outro"
-                            }
-                        
-                        # Remove existing CUE points with the same names
-                        for cue in list(entry.findall("CUE_V2")):
-                            name = cue.get("NAME")
-                            if name in cue_names.values():
-                                entry.remove(cue)
-                        
-                        # Add new CUE points
-                        for i, (cue_type, start_time) in enumerate(traktor_cues.items()):
-                            cue = ET.SubElement(entry, "CUE_V2")
-                            cue.set("NAME", cue_names[cue_type])
-                            cue.set("DISPL_ORDER", str(i))
-                            cue.set("TYPE", "0")  # 0 = Hot Cue
-                            cue.set("START", str(start_time))
-                            cue.set("LEN", "0")  # Single point, not a section
-                            cue.set("REPEATS", "-1")
-                            cue.set("HOTCUE", str(i+1))  # Hot Cue number (1-8)
-                
-            if not entry_found:
-                print(f"File {audio_filename} not found in Traktor collection")
+                if location is None:
+                    continue
+
+                nml_file = location.get("FILE", "")
+                nml_dir  = location.get("DIR",  "")
+                nml_vol  = location.get("VOLUME", "")
+
+                matched = False
+                try:
+                    nml_full = self._nml_location_to_path(nml_vol, nml_dir, nml_file)
+                    nml_norm = os.path.normcase(os.path.normpath(self._strip_invisible(nml_full)))
+                    if nml_norm == norm_target:
+                        matched = True
+                except Exception:
+                    pass
+
+                if not matched and self._strip_invisible(nml_file).lower() == bare_target:
+                    matched = True
+
+                if matched:
+                    matched_file_attr = nml_file
+                    break
+
+            if matched_file_attr is None:
+                print(f"Entry not found in NML for: {os.path.basename(audio_path)}")
                 return False
-            
-            # Save temporary file
+
+            # ── Step 2: text-based injection ──────────────────────────────────
+            with open(self.nml_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            # Build new CUE_V2 lines in Traktor's native style (explicit closing tags)
+            new_cue_lines = []
+            for cue_type in _write_types:
+                if cue_type not in cue_points:
+                    continue
+                hc_num   = hotcue_numbers.get(cue_type, 2)
+                start_ms = cue_points[cue_type] * 1000.0
+                new_cue_lines.append(
+                    f'<CUE_V2 NAME="n.n." DISPL_ORDER="0" TYPE="0" '
+                    f'START="{start_ms:.6f}" LEN="0.000000" '
+                    f'REPEATS="-1" HOTCUE="{hc_num}"></CUE_V2>'
+                )
+
+            # Timestamp in Traktor's format:
+            #   MODIFIED_DATE="YYYY/M/D"  (no zero-padding)
+            #   MODIFIED_TIME="<seconds since midnight>"
+            # Stamping this makes Traktor treat our entry as the authoritative
+            # (newest) version and keeps our injected cues when it next saves.
+            _now      = datetime.now()
+            _mod_date = f"{_now.year}/{_now.month}/{_now.day}"
+            _mod_time = str(_now.hour * 3600 + _now.minute * 60 + _now.second)
+
+            # Match complete ENTRY blocks (NML entries never nest)
+            entry_re = re.compile(r'(<ENTRY\b[^>]*>)(.*?)(</ENTRY>)', re.DOTALL)
+            # Match an existing CUE_V2 at any of our target HOTCUE slots
+            cue_slot_re = re.compile(
+                r'<CUE_V2\b[^>]*\bHOTCUE=["\']('
+                + '|'.join(re.escape(s) for s in target_slots)
+                + r')["\'][^>]*/?>(?:</CUE_V2>)?\n?',
+                re.DOTALL
+            )
+
+            patched = [False]
+
+            def _patch_entry(m):
+                open_tag, body, close_tag = m.group(1), m.group(2), m.group(3)
+                full_block = open_tag + body
+                if ('FILE="' + matched_file_attr + '"') not in full_block and \
+                   ("FILE='" + matched_file_attr + "'") not in full_block:
+                    return m.group(0)
+                patched[0] = True
+                # Advance the modification timestamp so Traktor's in-memory
+                # (stale) version doesn't overwrite our cues on exit.
+                open_tag = re.sub(r'\bMODIFIED_DATE="[^"]*"',
+                                  f'MODIFIED_DATE="{_mod_date}"', open_tag)
+                open_tag = re.sub(r'\bMODIFIED_TIME="[^"]*"',
+                                  f'MODIFIED_TIME="{_mod_time}"', open_tag)
+                body = cue_slot_re.sub('', body)    # remove stale cues at our slots
+                if new_cue_lines:
+                    body = body.rstrip() + '\n' + '\n'.join(new_cue_lines) + '\n'
+                return open_tag + body + close_tag
+
+            new_content = entry_re.sub(_patch_entry, content)
+
+            if not patched[0]:
+                print(f"Warning: ET matched the entry but text patch could not find it: "
+                      f"{os.path.basename(audio_path)}")
+                return False
+
+            # Write to temp, validate XML, atomically replace original
             temp_path = self.nml_path + ".temp"
-            tree.write(temp_path, encoding="UTF-8", xml_declaration=True)
-            
-            # Validate
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                f.write(new_content)
+
             try:
-                check_tree = ET.parse(temp_path)
-                valid_xml = True
-            except:
-                valid_xml = False
-            
-            if valid_xml:
-                # Replace original file
-                os.replace(temp_path, self.nml_path)
-                print(f"Successfully updated: {audio_filename}")
-                return True
-            else:
+                ET.parse(temp_path)
+            except Exception as xml_err:
                 os.remove(temp_path)
-                print("XML validation failed")
+                print(f"XML validation failed: {xml_err}")
                 return False
-            
+
+            os.replace(temp_path, self.nml_path)
+            print(f"Successfully updated NML for: {os.path.basename(audio_path)}")
+            return True
+
         except Exception as e:
-            print(f"Error updating NML file: {str(e)}")
+            print(f"Error updating NML file: {e}")
+            import traceback; traceback.print_exc()
             return False
 
 

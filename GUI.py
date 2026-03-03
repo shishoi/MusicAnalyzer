@@ -140,11 +140,19 @@ class AudioAnalyzerGUI:
         self.rename_files_button.pack(side=tk.LEFT, padx=5)
         ToolTip(self.rename_files_button,
                 "Cleans filenames and embedded title tags\n"
-                "by removing characters that cause crashes\n"
-                "in DJ software (Serato, Traktor, Rekordbox).\n"
+                "by removing illegal characters, emoji and\n"
+                "invisible symbols that cause crashes in DJ\n"
+                "software (Serato, Traktor, Rekordbox).\n"
                 "\n"
-                "Illegal characters removed:\n"
-                "  / \\ : * ? \" < > |\n"
+                "Illegal chars removed:  / \\ : * ? \" < > |\n"
+                "Emoji / symbols removed: 😀 🎵 ♫ ★ etc.\n"
+                "Invisible chars removed: bidirectional marks,\n"
+                "  zero-width spaces, BOM — fixes Hebrew /\n"
+                "  Arabic filenames that look correct but\n"
+                "  break software.\n"
+                "\n"
+                "Supports: MP3, FLAC, WAV, M4A, AAC,\n"
+                "          MPEG, AIFF\n"
                 "\n"
                 "Both the filename on disk and the\n"
                 "ID3 / FLAC / M4A title tag are cleaned\n"
@@ -184,17 +192,21 @@ class AudioAnalyzerGUI:
         )
         self.collection_button.pack(side=tk.LEFT, padx=5)
         ToolTip(self.collection_button,
-                "Imports and displays your full DJ library:\n"
+                "Display and edit your Traktor library (NML)\n"
+                "directly — no more workarounds needed!\n"
                 "\n"
                 "  • Traktor   — collection.nml\n"
                 "  • Rekordbox — XML export file\n"
                 "  • Serato    — _Serato_ crate folder\n"
                 "\n"
+                "Finally! Edit track info in Hebrew (or any\n"
+                "RTL language) and it will appear correctly\n"
+                "inside Traktor — no garbled text.\n"
+                "\n"
                 "Shows all tracks with full metadata:\n"
                 "BPM, key, genre, rating, play count,\n"
                 "comment, last played date.\n"
-                "\n"
-                "Use to get an overview of your library.")
+                "Double-click any cell to edit and save.")
         
         # 5. Order My Music
         self.order_music_button = ttk.Button(
@@ -236,12 +248,19 @@ class AudioAnalyzerGUI:
                 "    Detected via Krumhansl-Schmuckler\n"
                 "    algorithm\n"
                 "  • CUE Points\n"
-                "    Auto-sets Intro, Build, Drop, Outro\n"
+                "    Auto-detects Intro, Build, Drop, Outro\n"
                 "    based on energy & beat analysis\n"
                 "\n"
-                "Results saved to tags + Traktor NML\n"
-                "when you click Save Changes.\n"
-                "Supports: MP3, FLAC, WAV, M4A.")
+                "Click Save Changes to:\n"
+                "  • Write BPM/Key tags to audio files\n"
+                "  • Save Build → Hot Cue 2\n"
+                "        Drop → Hot Cue 3\n"
+                "       Outro → Hot Cue 4\n"
+                "    into your Traktor collection.nml\n"
+                "    (Intro is detected but not saved)\n"
+                "\n"
+                "Supports: MP3, MPEG, AIFF, FLAC,\n"
+                "          WAV, M4A, OGG.")
         
         # 7. Save Changes
         self.save_button = ttk.Button(
@@ -1201,6 +1220,12 @@ class AudioAnalyzerGUI:
             if column_name in readonly_columns:
                 return  # Don't allow editing these columns
 
+        # In duplicates mode, only allow editing metadata columns
+        if self.current_mode == 'duplicates':
+            editable_columns = ['title', 'artists', 'album', 'BPM', 'year']
+            if column_name not in editable_columns:
+                return
+
         # In collection mode, prevent editing hardware/computed columns
         if self.current_mode == 'collection':
             readonly_columns = ['filepath', 'bitrate', 'length', 'autogain', 'cover']
@@ -1287,7 +1312,21 @@ class AudioAnalyzerGUI:
             # In collection mode, save the edited field back to the NML file
             if self.current_mode == 'collection':
                 self._save_collection_nml_field(file_path, column_name, entry.get())
-            
+
+            # In duplicates mode, save the edited tag to the audio file immediately
+            if self.current_mode == 'duplicates':
+                # Map duplicates column names to order_music tag names
+                _dup_tag_map = {
+                    'title': 'title',
+                    'artists': 'artist',
+                    'album': 'album',
+                    'BPM': 'bpm',
+                    'year': 'year',
+                }
+                mapped = _dup_tag_map.get(column_name)
+                if mapped and os.path.isfile(file_path):
+                    self._save_order_music_tag(file_path, mapped, entry.get())
+
             # Destroy the entry widget
             entry.destroy()
         
@@ -1303,7 +1342,7 @@ class AudioAnalyzerGUI:
         file_paths = filedialog.askopenfilenames(
             title="Select audio files to analyze",
             filetypes=(
-                ("Audio files", "*.mp3 *.wav *.flac *.aac *.m4a *.ogg"),
+                ("Audio files", "*.mp3 *.wav *.flac *.aac *.m4a *.ogg *.wma *.mpeg *.mpg *.aif *.aiff"),
                 ("All files", "*.*")
             )
         )
@@ -1348,7 +1387,7 @@ class AudioAnalyzerGUI:
                 progress = (i / len(file_paths)) * 100
                 self.progress_var.set(progress)
 
-                self.status_var.set(f"Analyzing file {i+1}/{len(file_paths)}: {os.path.basename(file_path)}")
+                self.status_var.set(f"{os.path.basename(file_path)} — Analyzing: {i+1}/{len(file_paths)}")
                 
                 # Perform analysis
                 analyzer = AudioAnalyzer(file_path)
@@ -1418,7 +1457,7 @@ class AudioAnalyzerGUI:
             messagebox.showerror("Error", f"An error occurred during analysis: {str(e)}")
     
     def save_changes(self):
-        """Save tags to MP3 files and CUE points to Traktor"""
+        """Save tags to all audio files and Hot CUE points to Traktor"""
         if not self.analysis_results:
             messagebox.showinfo("Info", "No analysis results to save.")
             return
@@ -1427,93 +1466,105 @@ class AudioAnalyzerGUI:
             self.status_var.set("Saving changes...")
             self.progress_var.set(0)
             
-            # Try to import mutagen for MP3 tag editing
+            # Try to import mutagen
             try:
                 import mutagen
                 from mutagen.id3 import ID3, TIT2, TBPM, TKEY
+                from mutagen.flac import FLAC
+                from mutagen import File as MutagenFile
                 mutagen_available = True
             except ImportError:
                 mutagen_available = False
-                messagebox.showwarning("Warning", 
-                                     "Mutagen library not found. MP3 tags will not be saved.\n"
+                messagebox.showwarning("Warning",
+                                     "Mutagen library not found. Tags will not be saved.\n"
                                      "Install mutagen with: pip install mutagen")
             
-            # Locate Traktor collection file
-            #traktor_dir = "C:\\Users\\home\\Documents\\Native Instruments\\Traktor 3.11.1"
-            traktor_dir = "C:\\Users\\home\\Documents\\DJ\\DEV\\MusicAnalyzer"
-            nml_path = os.path.join(traktor_dir, "collection.nml")
-            
-            if not os.path.exists(nml_path):
-                messagebox.showwarning("Warning", 
-                                     f"Traktor collection file not found at: {nml_path}\n"
-                                     "CUE points will not be saved to Traktor.")
-                traktor_available = False
-            else:
+            # Let user pick the Traktor NML file (or cancel to skip)
+            nml_path = filedialog.askopenfilename(
+                title="Select Traktor collection.nml  (cancel to skip saving CUE points)",
+                filetypes=[("Traktor collection", "*.nml"), ("All files", "*.*")]
+            )
+            if nml_path and os.path.exists(nml_path):
                 traktor_available = True
                 editor = TraktorNMLEditor(nml_path)
-                
+            else:
+                traktor_available = False
+
             # Process each file
             total_files = len(self.analysis_results)
-            saved_mp3_count = 0
+            saved_tag_count = 0
             saved_traktor_count = 0
+            nml_not_found = []
             
             for i, (file_path, data) in enumerate(self.analysis_results.items()):
-                # Update progress
                 progress = (i / total_files) * 100
                 self.progress_var.set(progress)
-                
-                # Save MP3 tags if available
-                if mutagen_available and file_path.lower().endswith('.mp3'):
+                self.status_var.set(f"{os.path.basename(file_path)} — Saving: {i+1}/{total_files}")
+
+                # ── Save audio tags ──────────────────────────────────────────
+                if mutagen_available:
                     try:
-                        # Load ID3 tags
-                        audio = ID3(file_path)
-                        
-                        # Update tags
-                        if data.get('title'):
-                            audio["TIT2"] = TIT2(encoding=3, text=data['title'])
-                        
-                        if data.get('bpm'):
-                            bpm_str = str(int(float(data['bpm'])))
-                            audio["TBPM"] = TBPM(encoding=3, text=bpm_str)
-                        
-                        if data.get('key'):
-                            audio["TKEY"] = TKEY(encoding=3, text=data['key'])
-                        
-                        # Save changes
-                        audio.save()
-                        saved_mp3_count += 1
-                        
+                        _ext = file_path.lower().rsplit('.', 1)[-1]
+                        if _ext in ('mp3', 'mpeg', 'mpg', 'aif', 'aiff'):
+                            audio = ID3(file_path)
+                            if data.get('title'):
+                                audio["TIT2"] = TIT2(encoding=3, text=data['title'])
+                            if data.get('bpm'):
+                                audio["TBPM"] = TBPM(encoding=3, text=str(int(float(data['bpm']))))
+                            if data.get('key'):
+                                audio["TKEY"] = TKEY(encoding=3, text=data['key'])
+                            audio.save()
+                            saved_tag_count += 1
+                        elif _ext == 'flac':
+                            audio = FLAC(file_path)
+                            if data.get('title'):  audio['title'] = [data['title']]
+                            if data.get('bpm'):    audio['bpm']   = [str(int(float(data['bpm'])))]
+                            if data.get('key'):    audio['key']   = [data['key']]
+                            audio.save()
+                            saved_tag_count += 1
+                        else:
+                            # M4A, AAC, OGG, WMA, WAV — easy tags
+                            audio = MutagenFile(file_path, easy=True)
+                            if audio is not None:
+                                if data.get('title'): audio['title'] = data['title']
+                                if data.get('bpm'):   audio['bpm']   = str(int(float(data['bpm'])))
+                                if data.get('key'):   audio['key']   = data['key']
+                                audio.save()
+                                saved_tag_count += 1
                     except Exception as e:
-                        print(f"Error saving MP3 tags for {file_path}: {e}")
-                
-                # Save CUE points to Traktor if available
+                        print(f"Error saving tags for {file_path}: {e}")
+
+                # ── Save Hot CUE points to Traktor NML ───────────────────────
                 if traktor_available and 'cue_points' in data and data['cue_points']:
                     try:
-                        # Define custom names for the CUE points
-                        cue_names = {
-                            'intro': "INTRO",
-                            'build': "BUILD",
-                            'drop': "DROP",
-                            'outro': "OUTRO"
+                        # Only build/drop/outro as hot cues 2/3/4 — intro never written
+                        cue_hotcue_numbers = {
+                            'build': 2,
+                            'drop':  3,
+                            'outro': 4,
                         }
-                        
-                        # Add the CUE points to the NML file
-                        success = editor.add_cue_points(file_path, data['cue_points'], cue_names)
+                        success = editor.add_cue_points(
+                            file_path, data['cue_points'],
+                            hotcue_numbers=cue_hotcue_numbers
+                        )
                         if success:
                             saved_traktor_count += 1
-                            
+                        else:
+                            nml_not_found.append(os.path.basename(file_path))
                     except Exception as e:
                         print(f"Error saving CUE points for {file_path}: {e}")
             
-            # Complete the progress bar
             self.progress_var.set(100)
-            
-            # Show completion message
-            messagebox.showinfo("Save Complete", 
-                               f"Changes saved:\n"
-                               f"- MP3 tags: {saved_mp3_count} files\n"
-                               f"- Traktor CUE points: {saved_traktor_count} files")
-            
+            msg = (f"Changes saved:\n"
+                   f"- Audio tags:      {saved_tag_count} files\n"
+                   f"- Traktor Hot Cues: {saved_traktor_count} files")
+            if nml_not_found:
+                msg += (f"\n\n⚠ {len(nml_not_found)} file(s) not found in the NML —"
+                        f" hot cues were NOT saved for:\n" +
+                        "\n".join(nml_not_found[:10]))
+                if len(nml_not_found) > 10:
+                    msg += f"\n... and {len(nml_not_found)-10} more"
+            messagebox.showinfo("Save Complete", msg)
             self.status_var.set("Save completed.")
             
         except Exception as e:
@@ -2383,7 +2434,8 @@ class AudioAnalyzerGUI:
             audio_files = []
             for root, dirs, files in os.walk(directory):
                 for file in files:
-                    if file.lower().endswith(('.mp3', '.flac', '.m4a', '.wav', '.aac', '.ogg', '.wma')):
+                    if file.lower().endswith(('.mp3', '.flac', '.m4a', '.wav', '.aac', '.ogg', '.wma',
+                                             '.mpeg', '.mpg', '.aif', '.aiff')):
                         audio_files.append(os.path.join(root, file))
             
             if not audio_files:
@@ -2399,7 +2451,7 @@ class AudioAnalyzerGUI:
                     # Update progress
                     progress = int((i / len(audio_files)) * 100)
                     self.progress_var.set(progress)
-                    self.status_var.set(f"Loading {i+1}/{len(audio_files)}: {os.path.basename(filepath)}")
+                    self.status_var.set(f"{os.path.basename(filepath)} — Loading: {i+1}/{len(audio_files)}")
 
                     # Get metadata
                     meta = self._get_file_metadata(filepath)
@@ -2607,6 +2659,12 @@ class AudioAnalyzerGUI:
         text = text.replace('\u200C', '')   # Zero-width non-joiner (U+200C)
         text = text.replace('\u200D', '')   # Zero-width joiner (U+200D)
         text = text.replace('\uFEFF', '')   # Zero-width no-break space / BOM (U+FEFF)
+        # Remove Unicode bidirectional control chars (added by OS around RTL/Hebrew text)
+        for _bidi in ('\u200E', '\u200F',                    # LRM / RLM
+                      '\u202A', '\u202B', '\u202C',          # LRE / RLE / PDF
+                      '\u202D', '\u202E',                    # LRO / RLO
+                      '\u2066', '\u2067', '\u2068', '\u2069'):  # LRI / RLI / FSI / PDI
+            text = text.replace(_bidi, '')
         
         # Remove trailing spaces and dots
         text = text.rstrip(' .')
@@ -2618,28 +2676,90 @@ class AudioAnalyzerGUI:
 
     def rename_files(self):
         """Rename files to remove illegal characters from filenames and tags"""
-        directory = filedialog.askdirectory(title="Select folder to clean file names and tags")
-        
-        if not directory:
+        directories = self._pick_multiple_folders("Select folders to clean file names and tags")
+        if not directories:
             return
         self._set_active_button(self.rename_files_button)
-        
-        # Start rename process in a separate thread
-        threading.Thread(target=self._rename_files_thread, args=(directory,), daemon=True).start()
+        threading.Thread(target=self._rename_files_thread, args=(directories,), daemon=True).start()
 
-    def _rename_files_thread(self, directory):
+    def _pick_multiple_folders(self, title="Select folders"):
+        """Show a dialog that lets the user pick one or more folders."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title(title)
+        dialog.geometry("540x320")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() - 540) // 2
+        y = (dialog.winfo_screenheight() - 320) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+        ttk.Label(dialog, text="Folders to process:", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, padx=10, pady=(10, 2))
+
+        list_frame = ttk.Frame(dialog)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=2)
+        listbox = tk.Listbox(list_frame, selectmode=tk.SINGLE, font=("Segoe UI", 9))
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=listbox.yview)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        listbox.config(yscrollcommand=sb.set)
+
+        def add_folder():
+            d = filedialog.askdirectory(title="Add folder", parent=dialog)
+            if d and d not in listbox.get(0, tk.END):
+                listbox.insert(tk.END, d)
+
+        def remove_folder():
+            sel = listbox.curselection()
+            if sel:
+                listbox.delete(sel[0])
+
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(fill=tk.X, padx=10, pady=4)
+        ttk.Button(btn_frame, text="+ Add Folder",   command=add_folder,   width=16).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(btn_frame, text="− Remove",        command=remove_folder, width=12).pack(side=tk.LEFT)
+
+        result = []
+
+        def on_ok():
+            result.extend(listbox.get(0, tk.END))
+            dialog.destroy()
+
+        def on_cancel():
+            dialog.destroy()
+
+        ok_frame = ttk.Frame(dialog)
+        ok_frame.pack(fill=tk.X, padx=10, pady=(4, 10))
+        ttk.Button(ok_frame, text="OK",     command=on_ok,     width=12).pack(side=tk.RIGHT, padx=(4, 0))
+        ttk.Button(ok_frame, text="Cancel", command=on_cancel, width=12).pack(side=tk.RIGHT)
+
+        # Pre-open a first folder picker immediately for convenience
+        dialog.after(100, add_folder)
+        dialog.wait_window()
+        return result
+
+    def _rename_files_thread(self, directories):
         """Thread function to rename files without blocking the GUI"""
+        # Accept a list of directories or a single string (backward compat)
+        if isinstance(directories, str):
+            directories = [directories]
         try:
             self.start_feedback("Cleaning file names and tags")
-            self.status_var.set(f"Scanning directory: {directory}")
+            self.status_var.set(f"Scanning {len(directories)} folder(s)...")
             self.progress_var.set(0)
             
-            # Collect all audio files
+            # Collect all audio files from all selected directories
             audio_files = []
-            for root, dirs, files in os.walk(directory):
-                for file in files:
-                    if file.lower().endswith(('.mp3', '.flac', '.m4a', '.wav', '.aac', '.ogg', '.wma')):
-                        audio_files.append(os.path.join(root, file))
+            seen = set()
+            for directory in directories:
+                for root, dirs, files in os.walk(directory):
+                    for file in files:
+                        if file.lower().endswith(('.mp3', '.flac', '.m4a', '.wav', '.aac', '.ogg', '.wma',
+                                                 '.mpeg', '.mpg', '.aif', '.aiff')):
+                            fp = os.path.join(root, file)
+                            if fp not in seen:
+                                seen.add(fp)
+                                audio_files.append(fp)
             
             if not audio_files:
                 self.root.after(0, messagebox.showinfo, "No Files", "No audio files found in the selected directory.")
@@ -2655,7 +2775,7 @@ class AudioAnalyzerGUI:
                     # Update progress
                     progress = int((i / len(audio_files)) * 100)
                     self.progress_var.set(progress)
-                    self.status_var.set(f"Processing {i+1}/{len(audio_files)}: {os.path.basename(filepath)}")
+                    self.status_var.set(f"{os.path.basename(filepath)} — Processing: {i+1}/{len(audio_files)}")
                     
                     # Get directory and filename
                     dir_path = os.path.dirname(filepath)
@@ -2691,19 +2811,38 @@ class AudioAnalyzerGUI:
                     # Update tags (title)
                     try:
                         from mutagen import File as MutagenFile
-                        audio = MutagenFile(filepath, easy=True)
-                        if audio is not None:
+                        _ext = filepath.lower().rsplit('.', 1)[-1]
+                        if _ext in ('mp3', 'mpeg', 'mpg', 'aif', 'aiff'):
+                            # Use ID3 directly to avoid "can't sync to MPEG frame" errors
+                            from mutagen.id3 import ID3, TIT2
+                            try:
+                                _id3 = ID3(filepath)
+                            except Exception:
+                                from mutagen.id3 import ID3NoHeaderError
+                                _id3 = ID3()
                             tag_changed = False
-                            if 'title' in audio and audio['title']:
-                                old_title = audio['title'][0]
+                            if 'TIT2' in _id3:
+                                old_title = str(_id3['TIT2'])
                                 clean_title = self._clean_string(old_title)
                                 if old_title != clean_title:
-                                    audio['title'] = clean_title
+                                    _id3['TIT2'] = TIT2(encoding=3, text=clean_title)
                                     tag_changed = True
-                            
                             if tag_changed:
-                                audio.save()
+                                _id3.save(filepath)
                                 tag_updated_count += 1
+                        else:
+                            audio = MutagenFile(filepath, easy=True)
+                            if audio is not None:
+                                tag_changed = False
+                                if 'title' in audio and audio['title']:
+                                    old_title = audio['title'][0]
+                                    clean_title = self._clean_string(old_title)
+                                    if old_title != clean_title:
+                                        audio['title'] = clean_title
+                                        tag_changed = True
+                                if tag_changed:
+                                    audio.save()
+                                    tag_updated_count += 1
                     except Exception as e:
                         # Tag update failed but file might have been renamed
                         if file_renamed:
@@ -2786,13 +2925,14 @@ class AudioAnalyzerGUI:
             # Collect all audio files from directory
             for root, dirs, files in os.walk(directory):
                 for file in files:
-                    if file.lower().endswith(('.mp3', '.flac', '.m4a', '.wav', '.aac', '.ogg', '.wma')):
+                    if file.lower().endswith(('.mp3', '.flac', '.m4a', '.wav', '.aac', '.ogg', '.wma',
+                                             '.mpeg', '.mpg', '.aif', '.aiff')):
                         files_to_scan.append(os.path.join(root, file))
         else:
             files = filedialog.askopenfilenames(
                 title="Select audio files to analyze",
                 filetypes=[
-                    ("Audio Files", "*.mp3 *.flac *.m4a *.wav *.aac *.ogg *.wma"),
+                    ("Audio Files", "*.mp3 *.flac *.m4a *.wav *.aac *.ogg *.wma *.mpeg *.mpg *.aif *.aiff"),
                     ("All Files", "*.*")
                 ]
             )
@@ -2837,7 +2977,7 @@ class AudioAnalyzerGUI:
                 
                 try:
                     # Perform spectrum analysis
-                    self.status_var.set(f"Analyzing spectrum: {os.path.basename(filepath)} ({i+1}/{len(files_to_scan)})")
+                    self.status_var.set(f"{os.path.basename(filepath)} — Analyzing: {i+1}/{len(files_to_scan)}")
                     real_bitrate, cutoff_freq = self._analyze_spectrum(filepath)
                     
                     # Convert cutoff frequency to kHz
