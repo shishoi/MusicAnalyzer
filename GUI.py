@@ -78,6 +78,10 @@ class ToolTip:
 
 
 class AudioAnalyzerGUI:
+    # Checkbox glyphs for the duplicates table (no U+FE0F, which Tk can't draw)
+    UNCHECKED = "☐"
+    CHECKED = "☑"
+
     def __init__(self, root):
         self.root = root
         self.root.title("Audio Analyzer")
@@ -290,7 +294,7 @@ class AudioAnalyzerGUI:
         # 8. Delete Selected
         self.delete_selected_button = ttk.Button(
             self.action_frame,
-            text="🗑️ Delete Selected",
+            text="🗑 Delete Selected",
             command=self.delete_selected_files,
             width=15,
             state=tk.DISABLED
@@ -309,7 +313,7 @@ class AudioAnalyzerGUI:
         if _forest_theme_available:
             self._theme_toggle_btn = ttk.Button(
                 self.button_frame,
-                text="☀️ Light",
+                text="☀ Light",
                 command=self._toggle_theme,
                 width=10
             )
@@ -459,7 +463,7 @@ class AudioAnalyzerGUI:
         self.analyze_columns = ("filepath", "orig_bpm", "analyzed_bpm", "key", "traktor_key", "intro", "build", "drop", "outro")
         
         # Columns for "Find Duplicates" mode
-        self.duplicates_columns = ("filepath", "title", "artists", "album", "bitrate", "real_bitrate", "length", "size_mb", "BPM", "year", "has_cover")
+        self.duplicates_columns = ("check", "filepath", "title","artists", "album", "bitrate", "real_bitrate", "length", "size_mb", "BPM", "year", "has_cover")
         
         # Start with duplicates columns (neutral default)
         columns = self.duplicates_columns
@@ -494,6 +498,8 @@ class AudioAnalyzerGUI:
         self.tree.bind("<Double-1>", self.on_cell_double_click)
         # Bind Delete key to deletion handler
         self.tree.bind("<Delete>", lambda e: self.delete_selected_files())
+        # Click the checkbox column (duplicates mode) to mark rows for deletion
+        self.tree.bind("<Button-1>", self._on_check_click, add="+")
         # Bind right-click to context menu
         self.tree.bind("<Button-3>", self._on_tree_right_click)
         # Bind selection change to update Apply button state
@@ -515,7 +521,7 @@ class AudioAnalyzerGUI:
         
         self.apply_move_button = ttk.Button(
             button_frame,
-            text="➡️ Apply (Move Selected Files)",
+            text="➡ Apply (Move Selected Files)",
             command=self._move_selected_files,
             state=tk.DISABLED
         )
@@ -1039,6 +1045,7 @@ class AudioAnalyzerGUI:
         self.tree.configure(columns=self.duplicates_columns)
         
         # Define headings
+        self.tree.heading("check", text=self.UNCHECKED, command=self._toggle_all_checks)
         self.tree.heading("filepath", text="File Path")
         self.tree.heading("title", text="Title")
         self.tree.heading("artists", text="Contributing Artists")
@@ -1052,6 +1059,7 @@ class AudioAnalyzerGUI:
         self.tree.heading("has_cover", text="Cover")
         
         # Define columns width
+        self.tree.column("check", width=40, minwidth=40, stretch=tk.NO, anchor=tk.CENTER)
         self.tree.column("filepath", width=450)
         self.tree.column("title", width=250)
         self.tree.column("artists", width=180)
@@ -1784,7 +1792,7 @@ class AudioAnalyzerGUI:
         if self._current_theme == "forest-light":
             self._current_theme = "forest-dark"
             ttk.Style().theme_use("forest-dark")
-            self._theme_toggle_btn.config(text="☀️ Light")
+            self._theme_toggle_btn.config(text="☀ Light")
         else:
             self._current_theme = "forest-light"
             ttk.Style().theme_use("forest-light")
@@ -1936,13 +1944,13 @@ class AudioAnalyzerGUI:
 
         self.play_button = ttk.Button(button_row, text="Play", command=self.play_selected_file)
         self.play_button.pack(side=tk.LEFT, padx=2)
-        self.play_button.config(text="▶️ Play")
+        self.play_button.config(text="▶ Play")
         self.pause_button = ttk.Button(button_row, text="Pause", command=self.pause_playback)
         self.pause_button.pack(side=tk.LEFT, padx=2)
-        self.pause_button.config(text="⏸️ Pause")
+        self.pause_button.config(text="⏸ Pause")
         self.stop_button = ttk.Button(button_row, text="Stop", command=self.stop_playback)
         self.stop_button.pack(side=tk.LEFT, padx=2)
-        self.stop_button.config(text="⏹️ Stop")
+        self.stop_button.config(text="⏹ Stop")
 
         self.pos_scale = ttk.Scale(button_row, from_=0, to=100, orient=tk.HORIZONTAL, variable=self.play_pos_var, command=self._on_seek)
         self.pos_scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6)
@@ -2464,6 +2472,7 @@ class AudioAnalyzerGUI:
                             "", 
                             tk.END, 
                             values=(
+                                self.UNCHECKED,
                                 file_path,
                                 meta.get('title') or filename,
                                 meta.get('artists') or "",
@@ -2508,11 +2517,47 @@ class AudioAnalyzerGUI:
             self.status_var.set(f"Error: {str(e)}")
             messagebox.showerror("Error", f"An error occurred during duplicate search: {str(e)}")
 
+    def _checked_items(self):
+        """Rows ticked in the duplicates table's checkbox column."""
+        if self.current_mode != 'duplicates':
+            return []
+        return [i for i in self.tree.get_children() if self.tree.set(i, "check") == self.CHECKED]
+
+    def _update_check_status(self):
+        count = len(self._checked_items())
+        all_rows = self.tree.get_children()
+        self.tree.heading("check", text=self.CHECKED if all_rows and count == len(all_rows) else self.UNCHECKED)
+        self.status_var.set(f"{count} file(s) marked for deletion." if count else "No files marked.")
+
+    def _on_check_click(self, event):
+        """Toggle a row's checkbox when its checkbox cell is clicked."""
+        if self.current_mode != 'duplicates' or self.tree.identify_region(event.x, event.y) != "cell":
+            return
+        column = self.tree.identify_column(event.x)
+        if self.tree["columns"][int(column[1:]) - 1] != "check":
+            return
+        item = self.tree.identify_row(event.y)
+        if not item:
+            return
+        new = self.UNCHECKED if self.tree.set(item, "check") == self.CHECKED else self.CHECKED
+        self.tree.set(item, "check", new)
+        self._update_check_status()
+        return "break"  # keep the row selection as it was
+
+    def _toggle_all_checks(self):
+        """Header checkbox: tick every row, or clear all if all are ticked."""
+        rows = self.tree.get_children()
+        new = self.UNCHECKED if rows and len(self._checked_items()) == len(rows) else self.CHECKED
+        for item in rows:
+            self.tree.set(item, "check", new)
+        self._update_check_status()
+
     def delete_selected_files(self):
-        """Delete files selected in the treeview (with confirmation)."""
-        selected = self.tree.selection()
+        """Delete ticked files (duplicates mode) or else the selected rows (with confirmation)."""
+        selected = self._checked_items() or self.tree.selection()
         if not selected:
-            messagebox.showinfo("Info", "No files selected for deletion.")
+            messagebox.showinfo("Info", "No files selected for deletion.\n\n"
+                                        "Tick the boxes next to the files, or select rows.")
             return
 
         # Gather file paths and normalize them
@@ -4029,7 +4074,7 @@ class AudioAnalyzerGUI:
                 track = self._collection_tracks_nc.get(os.path.normcase(fp))
 
             if track:
-                cover_indicator = "🖼️" if track.get("has_cover") else ""
+                cover_indicator = "🖼" if track.get("has_cover") else ""
                 self.tree.insert("", tk.END, values=(
                     track.get("filepath", fp),
                     track.get("title", ""),
@@ -4071,7 +4116,7 @@ class AudioAnalyzerGUI:
         for item in self.tree.get_children():
             self.tree.delete(item)
         for fp, track in self.collection_tracks.items():
-            cover_indicator = "🖼️" if track.get("has_cover") else ""
+            cover_indicator = "🖼" if track.get("has_cover") else ""
             self.tree.insert("", tk.END, values=(
                 track.get("filepath", fp),
                 track.get("title", ""),
