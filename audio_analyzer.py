@@ -7,6 +7,7 @@ from pydub import AudioSegment
 from datetime import datetime
 import shutil
 import xml.etree.ElementTree as ET
+from xml.sax.saxutils import escape as xml_escape
 import json
 
 """ 
@@ -96,95 +97,86 @@ class AudioAnalyzer:
             print(f"Error detecting key: {e}")
             return None
     
-    def detect_cue_points(self, sensitivity=1.0):
+    def detect_cue_points(self, sensitivity=1.0, beatgrid=None):
         """
-        Detect four main CUE points in a track:
-        1. Intro - beginning of the track
-        2. Build-up - musical development
-        3. Chorus/Drop - main section
-        4. Outro - end/transition section
-        
+        Detect four main CUE points in a track, each placed on a bar downbeat:
+        1. Intro - first section change after the track starts
+        2. Build-up - phrase leading into the drop
+        3. Chorus/Drop - biggest rise in energy + bass
+        4. Outro - last big fall in energy (mix-out point)
+
         Args:
-            sensitivity (float): Sensitivity for change detection (1.0 is normal)
-        
+            sensitivity (float): Kept for API compatibility.
+            beatgrid (tuple, optional): (bpm, anchor_sec) from Traktor's grid.
+                When given, cues land exactly on Traktor's downbeats; otherwise
+                librosa's beat tracker supplies the bars.
+
         Returns:
             dict: Dictionary with 4 main CUE points (time in seconds)
         """
         if self.y is None:
             print("No audio file loaded.")
             return {}
-        
+
         try:
-            # Get song length
             song_length = len(self.y) / self.sr
-            
-            # 1. Analyze energy and rhythm
-            onset_env = librosa.onset.onset_strength(y=self.y, sr=self.sr)
-            tempo, beats = librosa.beat.beat_track(onset_envelope=onset_env, sr=self.sr)
-            beat_times = librosa.frames_to_time(beats, sr=self.sr)
-            
-            # 2. Calculate RMS energy throughout the song
-            hop_length = 512
-            rms = librosa.feature.rms(y=self.y, hop_length=hop_length)[0]
-            times = librosa.times_like(rms, sr=self.sr, hop_length=hop_length)
-            
-            # 3. Detect significant changes in energy
-            # Divide song into segments
-            num_segments = 100
-            segment_length = len(rms) // num_segments
-            segment_energies = []
-            
-            for i in range(num_segments):
-                start = i * segment_length
-                end = start + segment_length
-                if end <= len(rms):
-                    segment_energies.append(np.mean(rms[start:end]))
-            
-            # 4. Identify significant changes
-            # Create a list of significant changes
-            changes = []
-            for i in range(1, len(segment_energies)):
-                change = segment_energies[i] - segment_energies[i-1]
-                changes.append((i, change))
-            
-            # Sort changes by magnitude (largest to smallest)
-            significant_changes = sorted(changes, key=lambda x: abs(x[1]), reverse=True)
-            
-            # 5. Identify CUE points based on changes
-            # Intro: beginning of the song, typically just after the very start
-            intro_time = min(10.0, song_length * 0.05)  # or 5% into the song, whichever is earlier
-            
-            # Find the drop/chorus - significant positive change in energy
-            positive_changes = [c for c in significant_changes if c[1] > 0]
-            # Typically the drop is between 25% and 50% of the song
-            likely_drops = [c for c in positive_changes if 0.2 <= (c[0]/num_segments) <= 0.6]
-            
-            if likely_drops:
-                drop_segment = likely_drops[0][0]  # Most significant positive change
-                drop_time = drop_segment * song_length / num_segments
+            bars = self._bar_starts(song_length, beatgrid)
+            if len(bars) < 24:
+                print("Track too short for bar-based CUE detection.")
+                return {}
+
+            energy = self._bar_energy(bars, song_length)
+            n = len(energy)
+
+            # Signed change in energy across each bar line (4 bars after vs 4 before).
+            # Section changes in dance music land on 8-bar phrase lines, so find the
+            # phrase offset with the strongest changes and favour boundaries on it.
+            w = 4
+            nov = np.zeros(n)
+            for b in range(w, n - w + 1):
+                nov[b] = energy[b:b + w].mean() - energy[b - w:b].mean()
+            phase = int(np.argmax([np.abs(nov[p::8]).sum() for p in range(8)]))
+
+            def weight(b):
+                if (b - phase) % 8 == 0:
+                    return 1.0
+                return 0.6 if (b - phase) % 4 == 0 else 0.25
+
+            score = np.array([nov[b] * weight(b) for b in range(n)])
+
+            # Drop: largest rise into a loud section, between 15% and 70% of the track
+            lo, hi = max(w, int(n * 0.15)), min(n - 8, int(n * 0.70))
+            drop_b = max(range(lo, hi), key=lambda b: score[b] + 0.3 * energy[b:b + 8].mean())
+
+            # Build: the phrase line 4/8/16 bars before the drop with the clearest change
+            # (start of the break or riser); 8 bars is the most common length.
+            prior = {8: 0.05, 16: 0.0, 4: -0.05}
+            cands = [drop_b - k for k in prior if drop_b - k >= w]
+            build_b = (max(cands, key=lambda b: abs(nov[b]) + prior[drop_b - b])
+                       if cands else max(0, drop_b - 8))
+
+            # Intro: first clear rise before the build; else first bar with sound
+            intro_b = next((b for b in range(w, build_b) if score[b] >= 0.12), None)
+            if intro_b is None:
+                intro_b = next((b for b in range(n) if energy[b] > 0.15), 0)
+                intro_b = min(intro_b, build_b)
+
+            # Outro: latest strong fall in energy after the drop with 8+ bars left
+            lo = max(drop_b + 8, int(n * 0.55))
+            falls = [(b, -score[b]) for b in range(lo, n - 4)]
+            strong = [b for b, s in falls if s >= 0.12]
+            if strong:
+                best = max(-score[b] for b in strong)
+                outro_b = max(b for b in strong if -score[b] >= 0.6 * best)
             else:
-                drop_time = song_length * 0.35  # Default: 35% into the song
-            
-            # Build-up: before the drop
-            # Typically 15-30 seconds before the drop
-            build_time = max(intro_time + 10, drop_time - 20)
-            
-            # Outro: towards end of song
-            outro_time = song_length * 0.85  # 85% into the song
-            
-            # Make sure points are reasonable and not overlapping
-            min_distance = 10  # Minimum distance between CUE points (in seconds)
-            
-            # Adjust points that are too close
-            if build_time - intro_time < min_distance:
-                build_time = intro_time + min_distance
-            
-            if drop_time - build_time < min_distance:
-                drop_time = build_time + min_distance
-            
-            if outro_time - drop_time < min_distance:
-                outro_time = drop_time + min_distance
-            
+                # No clear fall: 16 bars before the music ends, on the phrase grid
+                last = max((b for b in range(n) if energy[b] > 0.15), default=n - 1)
+                outro_b = max(lo, last - 16 - ((last - 16 - phase) % 8))
+            outro_b = min(outro_b, n - 1)
+
+            intro_time, build_time = float(bars[intro_b]), float(bars[build_b])
+            drop_time, outro_time = float(bars[drop_b]), float(bars[outro_b])
+
             # Store CUE points
             self.cue_points = {
                 'intro': intro_time,
@@ -192,7 +184,7 @@ class AudioAnalyzer:
                 'drop': drop_time,
                 'outro': outro_time
             }
-            
+
             print(f"Found 4 CUE points:")
             print(f"Intro: {self._format_time(intro_time)}")
             print(f"Build: {self._format_time(build_time)}")
@@ -210,7 +202,46 @@ class AudioAnalyzer:
         minutes = int(seconds // 60)
         seconds = int(seconds % 60)
         return f"{minutes:02d}:{seconds:02d}"
-    
+
+    def _bar_starts(self, song_length, beatgrid=None):
+        """Return the start time (sec) of every bar in the track.
+
+        With a Traktor beatgrid (bpm, anchor_sec) the bars follow Traktor's grid
+        exactly. Otherwise beats come from librosa and the downbeat is the beat
+        phase with the most low-frequency (kick) onset energy.
+        """
+        if beatgrid:
+            bpm, anchor = beatgrid
+            bar = 240.0 / bpm
+            first = anchor - np.floor(anchor / bar) * bar
+            return np.arange(first, song_length - bar / 2, bar)
+
+        onset_env = librosa.onset.onset_strength(y=self.y, sr=self.sr)
+        _, beats = librosa.beat.beat_track(onset_envelope=onset_env, sr=self.sr)
+        if len(beats) < 8:
+            return np.array([])
+        low_env = librosa.onset.onset_strength(y=self.y, sr=self.sr, fmax=150, n_mels=16)
+        phase = int(np.argmax([low_env[beats[p::4]].mean() for p in range(4)]))
+        return librosa.frames_to_time(beats[phase::4], sr=self.sr)
+
+    def _bar_energy(self, bars, song_length, hop_length=512):
+        """Loudness + bass level per bar, each scaled to roughly 0..1."""
+        mel = librosa.feature.melspectrogram(y=self.y, sr=self.sr, hop_length=hop_length, n_mels=64)
+        freqs = librosa.mel_frequencies(n_mels=64, fmax=self.sr / 2)
+        total = mel.sum(axis=0)
+        low = mel[freqs < 150].sum(axis=0)
+
+        edges = librosa.time_to_frames(np.append(bars, song_length), sr=self.sr, hop_length=hop_length)
+        edges = np.clip(edges, 0, mel.shape[1])
+
+        def per_bar(x):
+            v = np.array([x[s:max(e, s + 1)].mean() for s, e in zip(edges[:-1], edges[1:])])
+            db = 10 * np.log10(v + 1e-10)
+            lo, hi = np.percentile(db, 5), np.percentile(db, 95)
+            return np.clip((db - lo) / max(hi - lo, 1e-6), 0, 1)
+
+        return 0.5 * per_bar(total) + 0.5 * per_bar(low)
+
     def _get_traktor_notation(self, key_name):
         """
         Convert standard musical key to Traktor KEY format
@@ -420,6 +451,17 @@ class TraktorNMLEditor:
         parts = [p.lstrip(':') for p in dir_str.split('/') if p.lstrip(':')]
         return volume + '\\' + '\\'.join(parts) + '\\' + filename
 
+    @staticmethod
+    def _entry_beatgrid(entry):
+        """(bpm, anchor_sec) from an NML ENTRY's TEMPO and grid marker, or None."""
+        tempo = entry.find("TEMPO")
+        grid = next((c for c in entry.findall("CUE_V2") if c.get("TYPE") == "4"), None)
+        try:
+            bpm = float(tempo.get("BPM"))
+            return (bpm, float(grid.get("START")) / 1000.0) if bpm > 0 else None
+        except (AttributeError, TypeError, ValueError):
+            return None
+
     def add_cue_points(self, audio_path, cue_points, cue_names=None, hotcue_numbers=None):
         """
         Add hot CUE points (build=2, drop=3, outro=4) to a track in the NML.
@@ -436,9 +478,14 @@ class TraktorNMLEditor:
             cue_names  (dict, optional): Ignored — kept for API compatibility.
             hotcue_numbers (dict, optional): Override HOTCUE slot numbers.
 
+        Slots that already hold a cue are left untouched; their numbers are
+        stored in self.last_skipped_slots. Cues are snapped to the nearest bar
+        on the track's Traktor beat grid when it has one.
+
         Returns:
             bool: True on success, False if entry not found or write error.
         """
+        self.last_skipped_slots = []
         self.backup_collection()
 
         try:
@@ -457,7 +504,8 @@ class TraktorNMLEditor:
             tree = ET.parse(self.nml_path)
             root = tree.getroot()
 
-            matched_file_attr = None  # raw FILE= value exactly as stored in XML
+            matched_entry = None
+            name_matches = []  # fallback: same file name in another folder
 
             for entry in root.findall(".//ENTRY"):
                 location = entry.find("LOCATION")
@@ -468,25 +516,54 @@ class TraktorNMLEditor:
                 nml_dir  = location.get("DIR",  "")
                 nml_vol  = location.get("VOLUME", "")
 
-                matched = False
                 try:
                     nml_full = self._nml_location_to_path(nml_vol, nml_dir, nml_file)
                     nml_norm = os.path.normcase(os.path.normpath(self._strip_invisible(nml_full)))
                     if nml_norm == norm_target:
-                        matched = True
+                        matched_entry = entry
+                        break
                 except Exception:
                     pass
 
-                if not matched and self._strip_invisible(nml_file).lower() == bare_target:
-                    matched = True
+                if self._strip_invisible(nml_file).lower() == bare_target:
+                    name_matches.append(entry)
 
-                if matched:
-                    matched_file_attr = nml_file
-                    break
+            # Fall back to a file-name match only when it is unambiguous,
+            # otherwise the cues could land on a different copy of the song.
+            if matched_entry is None and len(name_matches) == 1:
+                matched_entry = name_matches[0]
 
-            if matched_file_attr is None:
-                print(f"Entry not found in NML for: {os.path.basename(audio_path)}")
+            if matched_entry is None:
+                why = "several entries share this file name" if name_matches else "entry not found"
+                print(f"NML: {why}: {os.path.basename(audio_path)}")
                 return False
+
+            # The raw text stores the attribute XML-escaped (& -> &amp;), while ET
+            # hands it back unescaped; escape it so the text search below finds it.
+            # Traktor writes ' literally, so only & < > " are escaped.
+            matched_file_attr = xml_escape(matched_entry.find("LOCATION").get("FILE", ""),
+                                           {'"': '&quot;'})
+
+            # Never overwrite a hot cue the user already set in one of our slots.
+            occupied = {c.get("HOTCUE") for c in matched_entry.findall("CUE_V2")
+                        if c.get("TYPE") != "4"}
+            self.last_skipped_slots = sorted(s for s in target_slots if s in occupied)
+            _write_types = tuple(t for t in _write_types
+                                 if str(hotcue_numbers.get(t)) not in occupied)
+            target_slots = {str(hotcue_numbers[t]) for t in _write_types if t in hotcue_numbers}
+            matched_dir_attr = xml_escape(matched_entry.find("LOCATION").get("DIR", ""),
+                                          {'"': '&quot;'})
+            if not any(t in cue_points for t in _write_types):
+                print(f"NML: all hot cue slots already set, nothing written: "
+                      f"{os.path.basename(audio_path)}")
+                return True
+
+            # Snap every cue to the nearest bar on Traktor's own beat grid
+            grid = self._entry_beatgrid(matched_entry)
+            if grid:
+                bar = 240.0 / grid[0]
+                cue_points = {k: grid[1] + round((v - grid[1]) / bar) * bar
+                              for k, v in cue_points.items()}
 
             # ── Step 2: text-based injection ──────────────────────────────────
             with open(self.nml_path, 'r', encoding='utf-8') as f:
@@ -532,6 +609,8 @@ class TraktorNMLEditor:
                 if ('FILE="' + matched_file_attr + '"') not in full_block and \
                    ("FILE='" + matched_file_attr + "'") not in full_block:
                     return m.group(0)
+                if patched[0] or ('DIR="' + matched_dir_attr + '"') not in full_block:
+                    return m.group(0)  # same file name, different folder
                 patched[0] = True
                 # Advance the modification timestamp so Traktor's in-memory
                 # (stale) version doesn't overwrite our cues on exit.
@@ -1759,3 +1838,36 @@ def load_collection_nml_path():
     except Exception as e:
         print(f"Error loading NML path: {e}")
     return None
+
+
+def load_traktor_beatgrids(nml_path):
+    """Read every track's Traktor beat grid from the NML.
+
+    Returns:
+        dict: normalised file path -> (bpm, anchor_sec). Empty if the NML
+        is missing or unreadable.
+    """
+    grids = {}
+    if not nml_path or not os.path.exists(nml_path):
+        return grids
+    try:
+        root = ET.parse(nml_path).getroot()
+    except Exception as e:
+        print(f"Error reading beat grids from NML: {e}")
+        return grids
+    strip = TraktorNMLEditor._strip_invisible
+    for entry in root.iter("ENTRY"):
+        loc = entry.find("LOCATION")
+        grid = TraktorNMLEditor._entry_beatgrid(entry)
+        if loc is None or grid is None:
+            continue
+        path = TraktorNMLEditor._nml_location_to_path(
+            loc.get("VOLUME", ""), loc.get("DIR", ""), loc.get("FILE", ""))
+        grids[os.path.normcase(os.path.normpath(strip(path)))] = grid
+    return grids
+
+
+def lookup_beatgrid(grids, audio_path):
+    """Find a file's (bpm, anchor_sec) in the dict from load_traktor_beatgrids."""
+    key = os.path.normcase(os.path.normpath(TraktorNMLEditor._strip_invisible(audio_path)))
+    return grids.get(key)

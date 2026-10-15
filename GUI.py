@@ -33,6 +33,7 @@ from audio_analyzer import (
     key_to_filepath, parse_traktor_playlists, update_track_field_in_nml,
     add_playlist_to_nml, add_folder_to_nml, delete_node_from_nml,
     save_collection_nml_path, load_collection_nml_path,
+    load_traktor_beatgrids, lookup_beatgrid,
 )
 
 # Optional: VLC-based playback support (python-vlc)
@@ -1378,7 +1379,10 @@ class AudioAnalyzerGUI:
 
             # Clear previous results
             self.analysis_results = {}
-            
+
+            # Traktor's beat grids let every cue land exactly on a Traktor downbeat
+            beatgrids = load_traktor_beatgrids(load_collection_nml_path())
+
             for i, file_path in enumerate(file_paths):
                 if self._stop_flag.is_set():
                     self.status_var.set("Stopped.")
@@ -1395,7 +1399,8 @@ class AudioAnalyzerGUI:
                 key = analyzer.analyze_key()
                 
                 # Detect CUE points
-                cue_points = analyzer.detect_cue_points()
+                cue_points = analyzer.detect_cue_points(
+                    beatgrid=lookup_beatgrid(beatgrids, file_path))
                 
                 # Format CUE points for display
                 intro_time = self._format_time(cue_points.get('intro', 0))
@@ -1495,7 +1500,8 @@ class AudioAnalyzerGUI:
             saved_tag_count = 0
             saved_traktor_count = 0
             nml_not_found = []
-            
+            kept_manual = []  # slots skipped because the user already set a cue there
+
             for i, (file_path, data) in enumerate(self.analysis_results.items()):
                 progress = (i / total_files) * 100
                 self.progress_var.set(progress)
@@ -1549,6 +1555,9 @@ class AudioAnalyzerGUI:
                         )
                         if success:
                             saved_traktor_count += 1
+                            if editor.last_skipped_slots:
+                                kept_manual.append(f"{os.path.basename(file_path)} "
+                                                   f"(cue {', '.join(editor.last_skipped_slots)})")
                         else:
                             nml_not_found.append(os.path.basename(file_path))
                     except Exception as e:
@@ -1564,6 +1573,11 @@ class AudioAnalyzerGUI:
                         "\n".join(nml_not_found[:10]))
                 if len(nml_not_found) > 10:
                     msg += f"\n... and {len(nml_not_found)-10} more"
+            if kept_manual:
+                msg += (f"\n\nKept your existing hot cues (slot already in use) for "
+                        f"{len(kept_manual)} file(s):\n" + "\n".join(kept_manual[:10]))
+                if len(kept_manual) > 10:
+                    msg += f"\n... and {len(kept_manual)-10} more"
             messagebox.showinfo("Save Complete", msg)
             self.status_var.set("Save completed.")
             
