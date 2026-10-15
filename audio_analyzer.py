@@ -579,7 +579,7 @@ def find_duplicate_songs(directory, tolerance_sec=3.0, progress_callback=None):
     Find duplicate songs using a faster multi-factor approach
     
     Args:
-        directory (str): Path to music directory
+        directory (str | list): Path to music directory, or a list of paths
         tolerance_sec (float): Tolerance in seconds for length differences (default: 3 seconds)
         progress_callback (function): Optional callback function to report progress (0-100)
     
@@ -590,17 +590,29 @@ def find_duplicate_songs(directory, tolerance_sec=3.0, progress_callback=None):
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import hashlib
     import os.path
-    
-    print(f"Scanning directory: {directory}")
+
+    # Normalise: accept single path or list of paths
+    if isinstance(directory, (list, tuple)):
+        directories = [d for d in directory if d]
+    else:
+        directories = [directory]
+
+    for d in directories:
+        print(f"Scanning directory: {d}")
     print("Looking for audio files...")
     
-    # Collect all audio files
+    # Collect all audio files (deduplicated by realpath to avoid double-counting)
+    seen_paths = set()
     audio_files = []
-    for root, _, files in os.walk(directory):
-        for file in files:
-            if file.lower().endswith(('.mp3', '.wav', '.flac', '.aac', '.m4a', '.ogg')):
-                full_path = os.path.join(root, file)
-                audio_files.append(full_path)
+    for scan_dir in directories:
+        for root, _, files in os.walk(scan_dir):
+            for file in files:
+                if file.lower().endswith(('.mp3', '.wav', '.flac', '.aac', '.m4a', '.ogg')):
+                    full_path = os.path.join(root, file)
+                    real = os.path.realpath(full_path)
+                    if real not in seen_paths:
+                        seen_paths.add(real)
+                        audio_files.append(full_path)
     
     print(f"Found {len(audio_files)} audio files")
     if len(audio_files) == 0:

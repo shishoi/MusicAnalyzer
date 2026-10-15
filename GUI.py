@@ -2132,19 +2132,234 @@ class AudioAnalyzerGUI:
         except Exception:
             return "00:00"
 
+    def _ask_multiple_directories(self, parent=None, title="Select Folders"):
+        """
+        Open the Windows IFileOpenDialog with FOS_PICKFOLDERS | FOS_ALLOWMULTISELECT
+        so the user can Ctrl/Shift-click to pick several folders at once.
+        Falls back to the standard single-folder askdirectory on any error.
+        Returns a (possibly empty) list of selected folder paths.
+        """
+        import ctypes, sys
+        if sys.platform != "win32":
+            p = filedialog.askdirectory(title=title, parent=parent)
+            return [p] if p else []
+
+        try:
+            ole32 = ctypes.windll.ole32
+            ole32.CoInitializeEx(None, 0x02)   # COINIT_APARTMENTTHREADED
+
+            class GUID(ctypes.Structure):
+                _fields_ = [("Data1", ctypes.c_ulong),
+                            ("Data2", ctypes.c_ushort),
+                            ("Data3", ctypes.c_ushort),
+                            ("Data4", ctypes.c_uint8 * 8)]
+
+            # CLSID_FileOpenDialog  {DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7}
+            CLSID_FOD = GUID(0xDC1C5A9C, 0xE88A, 0x4DDE,
+                             (ctypes.c_uint8 * 8)(0xA5,0xA1,0x60,0xF8,0x2A,0x20,0xAE,0xF7))
+            # IID_IFileOpenDialog  {D57C7288-D4AD-4768-BE02-9D969532D960}
+            IID_FOD = GUID(0xD57C7288, 0xD4AD, 0x4768,
+                           (ctypes.c_uint8 * 8)(0xBE,0x02,0x9D,0x96,0x95,0x32,0xD9,0x60))
+
+            CLSCTX_INPROC_SERVER = 1
+            FOS_FORCEFILESYSTEM  = 0x40
+            FOS_PICKFOLDERS      = 0x20
+            FOS_ALLOWMULTISELECT = 0x200
+            SIGDN_FILESYSPATH    = ctypes.c_int(-2147319808)   # 0x80058000 as int32
+
+            # Create COM object
+            dialog_ptr = ctypes.c_void_p()
+            hr = ole32.CoCreateInstance(
+                ctypes.byref(CLSID_FOD), None, CLSCTX_INPROC_SERVER,
+                ctypes.byref(IID_FOD), ctypes.byref(dialog_ptr)
+            )
+            if hr != 0:
+                raise OSError(f"CoCreateInstance 0x{hr & 0xFFFFFFFF:08X}")
+
+            # Resolve vtable
+            vt = ctypes.cast(
+                ctypes.cast(dialog_ptr, ctypes.POINTER(ctypes.c_void_p))[0],
+                ctypes.POINTER(ctypes.c_void_p)
+            )
+
+            # vtable slots (IUnknown 0-2, IModalWindow 3, IFileDialog 4-26, IFileOpenDialog 27-28)
+            HRESULT  = ctypes.c_long
+            UINT32   = ctypes.c_uint32
+            PVOID    = ctypes.c_void_p
+            WSTR     = ctypes.c_wchar_p
+
+            AddRef       = ctypes.WINFUNCTYPE(ctypes.c_ulong, PVOID)(vt[1])
+            Release      = ctypes.WINFUNCTYPE(ctypes.c_ulong, PVOID)(vt[2])
+            Show         = ctypes.WINFUNCTYPE(HRESULT, PVOID, ctypes.wintypes.HWND)(vt[3])
+            SetOptions   = ctypes.WINFUNCTYPE(HRESULT, PVOID, UINT32)(vt[9])
+            GetOptions   = ctypes.WINFUNCTYPE(HRESULT, PVOID, ctypes.POINTER(UINT32))(vt[10])
+            SetTitle     = ctypes.WINFUNCTYPE(HRESULT, PVOID, WSTR)(vt[17])
+            GetResults   = ctypes.WINFUNCTYPE(HRESULT, PVOID, ctypes.POINTER(PVOID))(vt[27])
+
+            # Configure options
+            opts = UINT32()
+            GetOptions(dialog_ptr, ctypes.byref(opts))
+            SetOptions(dialog_ptr, opts.value | FOS_PICKFOLDERS | FOS_ALLOWMULTISELECT | FOS_FORCEFILESYSTEM)
+            SetTitle(dialog_ptr, title)
+
+            # Show — pass parent HWND if available
+            hwnd = ctypes.wintypes.HWND(0)
+            if parent:
+                try:
+                    hwnd = ctypes.wintypes.HWND(parent.winfo_id())
+                except Exception:
+                    pass
+            hr = Show(dialog_ptr, hwnd)
+
+            paths = []
+            if hr == 0:   # S_OK — user confirmed
+                items_ptr = PVOID()
+                hr2 = GetResults(dialog_ptr, ctypes.byref(items_ptr))
+                if hr2 == 0 and items_ptr:
+                    ivt = ctypes.cast(
+                        ctypes.cast(items_ptr, ctypes.POINTER(ctypes.c_void_p))[0],
+                        ctypes.POINTER(ctypes.c_void_p)
+                    )
+                    # IShellItemArray vtable: 7=GetCount, 8=GetItemAt
+                    IRelease  = ctypes.WINFUNCTYPE(ctypes.c_ulong, PVOID)(ivt[2])
+                    GetCount  = ctypes.WINFUNCTYPE(HRESULT, PVOID, ctypes.POINTER(UINT32))(ivt[7])
+                    GetItemAt = ctypes.WINFUNCTYPE(HRESULT, PVOID, UINT32, ctypes.POINTER(PVOID))(ivt[8])
+
+                    count = UINT32()
+                    GetCount(items_ptr, ctypes.byref(count))
+
+                    for i in range(count.value):
+                        item = PVOID()
+                        if GetItemAt(items_ptr, i, ctypes.byref(item)) == 0 and item:
+                            svt = ctypes.cast(
+                                ctypes.cast(item, ctypes.POINTER(ctypes.c_void_p))[0],
+                                ctypes.POINTER(ctypes.c_void_p)
+                            )
+                            # IShellItem vtable: 2=Release, 5=GetDisplayName
+                            SRelease      = ctypes.WINFUNCTYPE(ctypes.c_ulong, PVOID)(svt[2])
+                            GetDisplayName= ctypes.WINFUNCTYPE(HRESULT, PVOID, ctypes.c_int,
+                                                               ctypes.POINTER(PVOID))(svt[5])
+                            name_ptr = PVOID()
+                            if GetDisplayName(item, SIGDN_FILESYSPATH.value,
+                                              ctypes.byref(name_ptr)) == 0 and name_ptr.value:
+                                paths.append(ctypes.wstring_at(name_ptr.value))
+                                ole32.CoTaskMemFree(name_ptr)
+                            SRelease(item)
+
+                    IRelease(items_ptr)
+
+            Release(dialog_ptr)
+            return paths
+
+        except Exception as exc:
+            print(f"[multi-folder picker] falling back to single picker: {exc}")
+            p = filedialog.askdirectory(title=title, parent=parent)
+            return [p] if p else []
+
+    def _pick_duplicate_folders(self):
+        """Show a dialog that lets the user add/remove multiple folders to scan for duplicates.
+        Returns a list of folder paths, or None if cancelled."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Select Folders to Scan for Duplicates")
+        dialog.resizable(True, True)
+        dialog.minsize(500, 320)
+        dialog.grab_set()
+
+        # ---- Instructions ----
+        ttk.Label(
+            dialog,
+            text="Add folders to scan for duplicate audio files.",
+            font=("Segoe UI", 10)
+        ).pack(padx=12, pady=(12, 2), anchor="w")
+        ttk.Label(
+            dialog,
+            text="Tip: in the folder browser, hold Ctrl or Shift to select multiple folders at once.",
+            font=("Segoe UI", 9),
+            foreground="#555555"
+        ).pack(padx=12, pady=(0, 4), anchor="w")
+
+        # ---- Folder listbox with scrollbar ----
+        list_frame = ttk.Frame(dialog)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=4)
+
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical")
+        folder_listbox = tk.Listbox(
+            list_frame,
+            selectmode=tk.EXTENDED,
+            yscrollcommand=scrollbar.set,
+            font=("Segoe UI", 10),
+            activestyle="none",
+            height=8
+        )
+        scrollbar.config(command=folder_listbox.yview)
+        folder_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # ---- Buttons to manage folder list ----
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(fill=tk.X, padx=12, pady=4)
+
+        def add_folder():
+            picked = self._ask_multiple_directories(
+                parent=dialog,
+                title="Select one or more folders to scan  (Ctrl / Shift for multi-select)"
+            )
+            existing = set(folder_listbox.get(0, tk.END))
+            for path in picked:
+                if path and path not in existing:
+                    folder_listbox.insert(tk.END, path)
+                    existing.add(path)
+
+        def remove_selected():
+            # Remove in reverse order to keep indices valid
+            for idx in reversed(folder_listbox.curselection()):
+                folder_listbox.delete(idx)
+
+        ttk.Button(btn_frame, text="➕ Add Folder", command=add_folder, width=16).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(btn_frame, text="➖ Remove Selected", command=remove_selected, width=18).pack(side=tk.LEFT)
+
+        # ---- OK / Cancel ----
+        result = {"folders": None}
+
+        def on_ok():
+            folders = list(folder_listbox.get(0, tk.END))
+            if not folders:
+                messagebox.showwarning("No folders", "Please add at least one folder.", parent=dialog)
+                return
+            result["folders"] = folders
+            dialog.destroy()
+
+        def on_cancel():
+            dialog.destroy()
+
+        ok_frame = ttk.Frame(dialog)
+        ok_frame.pack(fill=tk.X, padx=12, pady=(4, 12))
+        ttk.Button(ok_frame, text="✔ Scan", command=on_ok, width=12).pack(side=tk.RIGHT, padx=(6, 0))
+        ttk.Button(ok_frame, text="✕ Cancel", command=on_cancel, width=12).pack(side=tk.RIGHT)
+
+        # Centre over parent
+        dialog.update_idletasks()
+        pw, ph = self.root.winfo_width(), self.root.winfo_height()
+        px, py = self.root.winfo_rootx(), self.root.winfo_rooty()
+        dw, dh = dialog.winfo_width(), dialog.winfo_height()
+        dialog.geometry(f"+{px + (pw - dw) // 2}+{py + (ph - dh) // 2}")
+
+        self.root.wait_window(dialog)
+        return result["folders"]
+
     def find_duplicates(self):
-        """Find duplicate audio files"""
-        directory = filedialog.askdirectory(title="Select directory to scan for duplicates")
-        
-        if not directory:
+        """Find duplicate audio files (supports multiple folders)"""
+        directories = self._pick_duplicate_folders()
+
+        if not directories:
             return
         self._set_active_button(self.find_duplicates_button)
-        
+
         # Get tolerance value
         tolerance_sec = 3.0  # Default
-        
+
         # Start duplicate search in a separate thread
-        threading.Thread(target=self._find_duplicates_thread, args=(directory, tolerance_sec), daemon=True).start()
+        threading.Thread(target=self._find_duplicates_thread, args=(directories, tolerance_sec), daemon=True).start()
 
     def _find_duplicates_thread(self, directory, tolerance_sec):
         """Thread function to find duplicates without blocking the GUI"""
@@ -2154,7 +2369,11 @@ class AudioAnalyzerGUI:
                 self.start_feedback("Searching duplicates")
             except Exception:
                 pass
-            self.status_var.set(f"Scanning directory for duplicates: {directory}")
+            if isinstance(directory, (list, tuple)):
+                dir_label = f"{len(directory)} folder(s): " + ", ".join(directory)
+            else:
+                dir_label = directory
+            self.status_var.set(f"Scanning for duplicates: {dir_label}")
             self.progress_var.set(0)
             
             # Switch to duplicates mode columns (do this in main thread)
@@ -3097,6 +3316,24 @@ class AudioAnalyzerGUI:
             print(f"Error checking bitrate mismatch: {e}")
             return ''
     
+    def _aac_bitrate_label(self, tag_kbps):
+        """Map an AAC tag bitrate to a perceptual quality label.
+        AAC is a more efficient codec than MP3: 256 kbps AAC is perceptually
+        transparent and equivalent in quality to 320 kbps MP3.
+        This mapping is used instead of spectrum analysis for AAC files,
+        since AAC uses psychoacoustic smooth rolloff (no brick-wall cutoff)
+        and its container bitrate tag is always accurate.
+        """
+        if tag_kbps >= 256:   return "~320 kbps"      # 256 kbps AAC ≈ 320 kbps MP3
+        elif tag_kbps >= 192: return "~256 kbps"      # 192 kbps AAC ≈ 256 kbps MP3
+        elif tag_kbps >= 160: return "~224 kbps"
+        elif tag_kbps >= 128: return "~192 kbps"
+        elif tag_kbps >= 96:  return "~160 kbps"
+        elif tag_kbps >= 80:  return "~128 kbps"
+        elif tag_kbps >= 64:  return "~96 kbps"
+        elif tag_kbps > 0:    return "~64 kbps or lower"
+        else:                 return "Unknown"
+
     def _analyze_spectrum(self, file_path):
         """Analyze audio spectrum to detect frequency cutoff.
         Uses intelligent window sampling to avoid silent sections and breakdowns."""
@@ -3105,6 +3342,22 @@ class AudioAnalyzerGUI:
             import numpy as np
             from mutagen import File as MutagenFile
             
+            # --- AAC / M4A early exit ---
+            # AAC uses a psychoacoustic smooth rolloff — there is no brick-wall
+            # frequency cutoff to detect. Spectral analysis gives unreliable
+            # results for AAC. The container bitrate tag is always accurate for
+            # AAC (unlike MP3 which can be fraudulently re-encoded), so we map
+            # the tag bitrate directly to a perceptual quality label and return.
+            ext = os.path.splitext(file_path)[1].lower()
+            if ext in ('.m4a', '.m4p', '.aac'):
+                audio_file = MutagenFile(file_path)
+                tag_br = getattr(audio_file.info, 'bitrate', 0) or 0
+                tag_kbps = int(tag_br / 1000)
+                label = self._aac_bitrate_label(tag_kbps)
+                # Return Nyquist as the notional cutoff freq (AAC has full-range content)
+                nyquist = getattr(audio_file.info, 'sample_rate', 44100) // 2
+                return label, nyquist
+
             # Get total duration without loading entire file
             audio_file = MutagenFile(file_path)
             total_duration = audio_file.info.length
@@ -3120,13 +3373,21 @@ class AudioAnalyzerGUI:
                 freqs = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
                 avg_spectrum = np.mean(D, axis=1)
                 cutoff_freq = self._detect_frequency_cutoff(freqs, avg_spectrum)
-                estimated_bitrate = self._estimate_bitrate_from_cutoff(cutoff_freq)
                 
                 filesize_bitrate, mb_per_min = self._estimate_bitrate_from_file_size(file_path)
-                if cutoff_freq is None or mb_per_min >= 2.2 or (mb_per_min >= 1.7 and cutoff_freq < 18000) or (mb_per_min >= 1.3 and cutoff_freq < 16000):
+                estimated_bitrate = self._estimate_bitrate_from_cutoff(cutoff_freq)
+                
+                if cutoff_freq is None:
                     estimated_bitrate = filesize_bitrate
-                    if cutoff_freq is None and 'Lossless' in filesize_bitrate:
-                        cutoff_freq = int(22050)  # Assume standard sample rate
+                    if 'Lossless' in filesize_bitrate:
+                        cutoff_freq = int(22050)
+                elif (mb_per_min >= 2.2 and cutoff_freq >= 17000) or \
+                     (mb_per_min >= 1.7 and cutoff_freq < 18000) or \
+                     (mb_per_min >= 1.3 and cutoff_freq < 16000) or \
+                     'Lossless' in filesize_bitrate:
+                    estimated_bitrate = filesize_bitrate
+                    if 'Lossless' in filesize_bitrate:
+                        cutoff_freq = int(22050)
                 
                 return estimated_bitrate, cutoff_freq
             
@@ -3198,11 +3459,12 @@ class AudioAnalyzerGUI:
             else:
                 cutoff_freq = None
             
-            # Estimate bitrate from cutoff
-            estimated_bitrate = self._estimate_bitrate_from_cutoff(cutoff_freq)
-            
             # ALWAYS run file size estimation as verification
             filesize_bitrate, mb_per_min = self._estimate_bitrate_from_file_size(file_path)
+            
+            # Estimate bitrate from spectral cutoff (MP3 thresholds — AAC already
+            # returned early at the top of this function)
+            estimated_bitrate = self._estimate_bitrate_from_cutoff(cutoff_freq)
             
             # Decision logic: Compare spectrum analysis with file size
             if cutoff_freq is None:
@@ -3210,8 +3472,10 @@ class AudioAnalyzerGUI:
                 estimated_bitrate = filesize_bitrate
                 if 'Lossless' in filesize_bitrate:
                     cutoff_freq = int(sr / 2)  # Nyquist frequency
-            elif mb_per_min >= 2.2:
-                # File size indicates 320 kbps - trust file size over spectrum
+            elif mb_per_min >= 2.2 and cutoff_freq >= 17000:
+                # File size says 320 kbps AND spectrum confirms >= 17 kHz content.
+                # If cutoff < 17 kHz despite a large file, it's likely a fake/re-encoded
+                # file (e.g. 128 kbps re-encoded to 320 kbps) -> trust the spectrum.
                 estimated_bitrate = filesize_bitrate
             elif mb_per_min >= 1.7 and cutoff_freq < 18000:
                 # File size indicates 256 kbps but spectrum suggests lower - trust file size
@@ -3256,23 +3520,26 @@ class AudioAnalyzerGUI:
                 if all(spectrum_diff[i:i+5] < drop_threshold):
                     return int(high_freqs[i])
             
-            # Method 2: Energy threshold method with rolling average
+            # Method 2: Peak-relative energy threshold
+            # Genuine audio content stays within 25 dB of the spectral peak.
+            # Anything more than 25 dB below the peak (in the 10-20 kHz range)
+            # is encoder padding / noise, not real content — this reliably detects
+            # files that were re-encoded from a lower bitrate (e.g. 128 -> 320 kbps).
             window_size = 5
             if len(high_spectrum) >= window_size:
                 smoothed = np.convolve(high_spectrum, np.ones(window_size)/window_size, mode='valid')
                 smoothed_freqs = high_freqs[:len(smoothed)]
                 
-                noise_floor = np.percentile(smoothed, 5)
-                energy_threshold = noise_floor + 6
+                peak_energy = np.max(smoothed)
+                content_threshold = peak_energy - 25  # 25 dB below peak = noise floor
                 
-                above_threshold = smoothed > energy_threshold
-                if np.any(above_threshold):
-                    last_energy_idx = np.where(above_threshold)[0][-1]
-                    
-                    if last_energy_idx < len(smoothed_freqs) - 10:
-                        remaining_energy = smoothed[last_energy_idx+5:]
-                        if len(remaining_energy) > 0 and np.mean(remaining_energy) < energy_threshold:
-                            return int(smoothed_freqs[last_energy_idx])
+                above_content = smoothed > content_threshold
+                if np.any(above_content):
+                    last_content_idx = np.where(above_content)[0][-1]
+                    # If meaningful content ends well before the Nyquist limit,
+                    # that frequency is the effective cutoff
+                    if last_content_idx < len(smoothed) - 5:
+                        return int(smoothed_freqs[last_content_idx])
             
             # Method 3: Frequency band energy comparison
             band_size = 500  # Hz
@@ -3308,10 +3575,38 @@ class AudioAnalyzerGUI:
             print(f"Cutoff detection failed: {str(e)}")
             return None
     
-    def _estimate_bitrate_from_cutoff(self, cutoff_freq):
-        """Estimate bitrate based on frequency cutoff"""
+    def _estimate_bitrate_from_cutoff(self, cutoff_freq, is_aac=False):
+        """Estimate bitrate based on frequency cutoff.
+        
+        AAC/M4A files use adjusted thresholds because AAC is a more efficient
+        codec: a 256 kbps AAC file achieves similar perceptual quality as
+        320 kbps MP3 but naturally rolls off ~1 kHz lower in the spectrum.
+        """
         if cutoff_freq is None:
             return "Unknown"
+        
+        if is_aac:
+            # AAC thresholds shifted ~1 kHz lower than equivalent MP3 quality
+            if cutoff_freq >= 19500:
+                return "320 kbps or Lossless"
+            elif cutoff_freq >= 18000:
+                return "~320 kbps"
+            elif cutoff_freq >= 17000:
+                return "~256 kbps"
+            elif cutoff_freq >= 16000:
+                return "~224 kbps"
+            elif cutoff_freq >= 15000:
+                return "~192 kbps"
+            elif cutoff_freq >= 14000:
+                return "~160 kbps"
+            elif cutoff_freq >= 13000:
+                return "~128 kbps"
+            elif cutoff_freq >= 11000:
+                return "~128 kbps (CBR)"
+            elif cutoff_freq >= 10000:
+                return "~96 kbps"
+            else:
+                return "~64 kbps or lower"
         
         if cutoff_freq >= 20000:
             return "320 kbps or Lossless"
