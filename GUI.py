@@ -1261,24 +1261,23 @@ class AudioAnalyzerGUI:
             file_path = self.tree.set(item, "filepath")
             if file_path in self.analysis_results:
                 # Handle CUE points specially
-                if column_name in ["intro", "buildup", "drop"]:
+                if column_name in ("intro", "build", "drop", "outro"):
                     time_str = entry.get()
                     try:
                         # Parse mm:ss format to seconds
                         parts = time_str.split(":")
                         if len(parts) == 2:
-                            minutes = int(parts[0])
-                            seconds = int(parts[1])
-                            total_seconds = minutes * 60 + seconds
-                            
-                            # Update CUE points
-                            cue_type = column_name
-                            self.analysis_results[file_path]["cue_points"][cue_type] = total_seconds
+                            total_seconds = int(parts[0]) * 60 + float(parts[1])
+
+                            # Update CUE points (snapped to the bar grid on save)
+                            self.analysis_results[file_path]["cue_points"][column_name] = total_seconds
                     except ValueError:
                         pass  # Ignore invalid format
                 else:
-                    # Update other fields directly
-                    self.analysis_results[file_path][column_name] = entry.get()
+                    # Table columns are named differently from the stored fields
+                    field = {'analyzed_bpm': 'bpm',
+                             'traktor_key': 'traktor_key_text'}.get(column_name, column_name)
+                    self.analysis_results[file_path][field] = entry.get()
             
             # In order_music mode, save changes to file tags immediately
             if self.current_mode == 'order_music' and file_path in self.order_music_files:
@@ -1422,7 +1421,6 @@ class AudioAnalyzerGUI:
                 
                 # Store results (keep minimal structured data)
                 self.analysis_results[file_path] = {
-                    'title': os.path.basename(file_path),
                     'bpm': bpm,
                     'key': key,
                     'traktor_key': analyzer.traktor_key,
@@ -1482,7 +1480,7 @@ class AudioAnalyzerGUI:
             # Try to import mutagen
             try:
                 import mutagen
-                from mutagen.id3 import ID3, TIT2, TBPM, TKEY
+                from mutagen.id3 import ID3, TBPM, TKEY
                 from mutagen.flac import FLAC
                 from mutagen import File as MutagenFile
                 mutagen_available = True
@@ -1521,8 +1519,6 @@ class AudioAnalyzerGUI:
                         _ext = file_path.lower().rsplit('.', 1)[-1]
                         if _ext in ('mp3', 'mpeg', 'mpg', 'aif', 'aiff'):
                             audio = ID3(file_path)
-                            if data.get('title'):
-                                audio["TIT2"] = TIT2(encoding=3, text=data['title'])
                             if data.get('bpm'):
                                 audio["TBPM"] = TBPM(encoding=3, text=str(int(float(data['bpm']))))
                             if data.get('key'):
@@ -1531,7 +1527,6 @@ class AudioAnalyzerGUI:
                             saved_tag_count += 1
                         elif _ext == 'flac':
                             audio = FLAC(file_path)
-                            if data.get('title'):  audio['title'] = [data['title']]
                             if data.get('bpm'):    audio['bpm']   = [str(int(float(data['bpm'])))]
                             if data.get('key'):    audio['key']   = [data['key']]
                             audio.save()
@@ -1540,7 +1535,6 @@ class AudioAnalyzerGUI:
                             # M4A, AAC, OGG, WMA, WAV — easy tags
                             audio = MutagenFile(file_path, easy=True)
                             if audio is not None:
-                                if data.get('title'): audio['title'] = data['title']
                                 if data.get('bpm'):   audio['bpm']   = str(int(float(data['bpm'])))
                                 if data.get('key'):   audio['key']   = data['key']
                                 audio.save()
