@@ -3011,15 +3011,19 @@ class AudioAnalyzerGUI:
         return result
 
     def _rename_files_thread(self, directories):
-        """Thread function to rename files without blocking the GUI"""
+        """Scan for file names and title tags that need cleaning, then open the preview.
+
+        Nothing is changed on disk here; the preview dialog decides what is applied.
+        """
         # Accept a list of directories or a single string (backward compat)
         if isinstance(directories, str):
             directories = [directories]
+        ui = self.root.after
         try:
-            self.start_feedback("Cleaning file names and tags")
-            self.status_var.set(f"Scanning {len(directories)} folder(s)...")
-            self.progress_var.set(0)
-            
+            ui(0, self.start_feedback, "Scanning file names and tags")
+            ui(0, self.status_var.set, f"Scanning {len(directories)} folder(s)...")
+            ui(0, self.progress_var.set, 0)
+
             # Collect all audio files from all selected directories
             audio_files = []
             seen = set()
@@ -3034,118 +3038,293 @@ class AudioAnalyzerGUI:
                                 audio_files.append(fp)
             
             if not audio_files:
-                self.root.after(0, messagebox.showinfo, "No Files", "No audio files found in the selected directory.")
-                self.stop_feedback("No files found")
+                ui(0, messagebox.showinfo, "No Files", "No audio files found in the selected directory.")
+                ui(0, self.stop_feedback, "No files found")
                 return
-            
-            renamed_count = 0
-            tag_updated_count = 0
-            failed = []
-            
+
+            # Collect only the files whose name or title would change
+            changes = []
             for i, filepath in enumerate(audio_files):
-                try:
-                    # Update progress
-                    progress = int((i / len(audio_files)) * 100)
-                    self.progress_var.set(progress)
-                    self.status_var.set(f"{os.path.basename(filepath)} — Processing: {i+1}/{len(audio_files)}")
-                    
-                    # Get directory and filename
-                    dir_path = os.path.dirname(filepath)
-                    old_filename = os.path.basename(filepath)
-                    name, ext = os.path.splitext(old_filename)
-                    
-                    # Clean filename
-                    clean_name = self._clean_string(name)
-                    new_filename = clean_name + ext
-                    new_filepath = os.path.join(dir_path, new_filename)
-                    
-                    # Check if filename needs renaming
-                    file_renamed = False
-                    if old_filename != new_filename:
-                        # Check if target filename already exists
-                        if os.path.exists(new_filepath) and new_filepath != filepath:
-                            # Add counter to make unique
-                            counter = 1
-                            while os.path.exists(new_filepath):
-                                new_filename = f"{clean_name}_{counter}{ext}"
-                                new_filepath = os.path.join(dir_path, new_filename)
-                                counter += 1
-                        
-                        try:
-                            os.rename(filepath, new_filepath)
-                            renamed_count += 1
-                            file_renamed = True
-                            filepath = new_filepath  # Update filepath for tag processing
-                        except Exception as e:
-                            failed.append((old_filename, f"Rename failed: {str(e)}"))
-                            continue
-                    
-                    # Update tags (title)
+                if i % 25 == 0:
+                    ui(0, self.progress_var.set, int((i / len(audio_files)) * 100))
+                    ui(0, self.status_var.set, f"{os.path.basename(filepath)} — Scanning: {i+1}/{len(audio_files)}")
+
+                dir_path, old_name = os.path.split(filepath)
+                stem, ext = os.path.splitext(old_name)
+                new_name = (self._clean_string(stem) or stem) + ext
+                old_title = self._read_title(filepath)
+                new_title = self._clean_string(old_title) if old_title else old_title
+
+                if new_name != old_name or new_title != old_title:
+                    changes.append({
+                        'dir': dir_path, 'ext': ext,
+                        'old_name': old_name, 'new_name': new_name,
+                        'old_title': old_title, 'new_title': new_title,
+                        'apply': True,
+                    })
+
+            ui(0, self._show_rename_preview, changes, len(audio_files))
+
+        except Exception as e:
+            ui(0, messagebox.showerror, "Rename Error", f"Error during rename scan:\n\n{str(e)}")
+            ui(0, self.stop_feedback, "Error")
+            ui(0, self.status_var.set, f"Error: {str(e)}")
+
+    def _read_title(self, filepath):
+        """Return the file's title tag, or None when it has none or can't be read."""
+        try:
+            _ext = filepath.lower().rsplit('.', 1)[-1]
+            if _ext in ('mp3', 'mpeg', 'mpg'):
+                from mutagen.id3 import ID3
+                _id3 = ID3(filepath)
+                return str(_id3['TIT2']) if 'TIT2' in _id3 else None
+            if _ext in ('aif', 'aiff'):
+                from mutagen.aiff import AIFF
+                tags = AIFF(filepath).tags
+                return str(tags['TIT2']) if tags is not None and 'TIT2' in tags else None
+            from mutagen import File as MutagenFile
+            audio = MutagenFile(filepath, easy=True)
+            if audio is not None and audio.get('title'):
+                return audio['title'][0]
+        except Exception:
+            pass
+        return None
+
+    def _write_title(self, filepath, title):
+        """Write the title tag; raises on failure."""
+        _ext = filepath.lower().rsplit('.', 1)[-1]
+        if _ext in ('mp3', 'mpeg', 'mpg'):
+            # Use ID3 directly to avoid "can't sync to MPEG frame" errors
+            from mutagen.id3 import ID3, TIT2, ID3NoHeaderError
+            try:
+                _id3 = ID3(filepath)
+            except ID3NoHeaderError:
+                _id3 = ID3()
+            _id3['TIT2'] = TIT2(encoding=3, text=title)
+            _id3.save(filepath)
+        elif _ext in ('aif', 'aiff'):
+            # AIFF keeps ID3 inside a chunk; a bare ID3() save would corrupt the file
+            from mutagen.aiff import AIFF
+            from mutagen.id3 import TIT2
+            audio = AIFF(filepath)
+            if audio.tags is None:
+                audio.add_tags()
+            audio.tags['TIT2'] = TIT2(encoding=3, text=title)
+            audio.save()
+        else:
+            from mutagen import File as MutagenFile
+            audio = MutagenFile(filepath, easy=True)
+            if audio is None:
+                raise ValueError("unsupported format")
+            audio['title'] = title
+            audio.save()
+
+    def _show_rename_preview(self, changes, total):
+        """List every planned rename / title change. The user can edit a new value,
+        untick rows, then apply or cancel. Runs on the main thread."""
+        self.progress_var.set(100)
+        if not changes:
+            self.stop_feedback("Nothing to change")
+            self.status_var.set(f"All {total} file names and titles are already clean.")
+            messagebox.showinfo("Rename Files", f"All {total} file names and titles are already clean.")
+            return
+        self.stop_feedback("Review changes")
+        self.status_var.set(f"{len(changes)} of {total} files would change — review and confirm.")
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"Rename Files — review {len(changes)} change(s)")
+        dialog.geometry("1200x600")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        ttk.Label(dialog, text="Double-click a New name or New title cell to edit it. "
+                               "Click ✓ (or press Space) to skip a file.").pack(anchor=tk.W, padx=10, pady=(10, 4))
+
+        frame = ttk.Frame(dialog)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10)
+        cols = ('apply', 'old_name', 'new_name', 'old_title', 'new_title', 'folder')
+        headings = {'apply': '✓', 'old_name': 'Current name', 'new_name': 'New name',
+                    'old_title': 'Current title', 'new_title': 'New title', 'folder': 'Folder'}
+        widths = {'apply': 40, 'old_name': 270, 'new_name': 270,
+                  'old_title': 200, 'new_title': 200, 'folder': 220}
+        tree = ttk.Treeview(frame, columns=cols, show='headings', selectmode='extended')
+        for c in cols:
+            tree.heading(c, text=headings[c])
+            tree.column(c, width=widths[c], stretch=(c != 'apply'),
+                        anchor=tk.CENTER if c == 'apply' else tk.W)
+        vsb = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        def row_values(c):
+            return ('✓' if c['apply'] else '', c['old_name'], c['new_name'],
+                    c['old_title'] or '', c['new_title'] or '', c['dir'])
+
+        for i, c in enumerate(changes):
+            tree.insert('', tk.END, iid=str(i), values=row_values(c))
+
+        count_var = tk.StringVar()
+
+        def refresh(iids=()):
+            for iid in iids:
+                tree.item(iid, values=row_values(changes[int(iid)]))
+            count_var.set(f"{sum(c['apply'] for c in changes)} of {len(changes)} selected")
+
+        refresh()
+
+        def toggle(iids):
+            for iid in iids:
+                changes[int(iid)]['apply'] = not changes[int(iid)]['apply']
+            refresh(iids)
+
+        def on_click(event):
+            if tree.identify_column(event.x) == '#1':
+                iid = tree.identify_row(event.y)
+                if iid:
+                    toggle([iid])
+                    return 'break'
+
+        tree.bind('<Button-1>', on_click)
+        tree.bind('<space>', lambda e: (toggle(tree.selection()), 'break')[1])
+
+        editable = {'#3': 'new_name', '#5': 'new_title'}
+        pending_edit = [None]  # commit() of the open cell editor, if any
+
+        def on_double_click(event):
+            col, iid = tree.identify_column(event.x), tree.identify_row(event.y)
+            if not iid or col not in editable:
+                return
+            field, c = editable[col], changes[int(iid)]
+            x, y, w, h = tree.bbox(iid, col)
+            entry = ttk.Entry(tree)
+            entry.insert(0, c[field] or '')
+            entry.select_range(0, tk.END)
+            entry.focus()
+            entry.place(x=x, y=y, width=w, height=h)
+            done = [False]
+
+            def commit(event=None):
+                if done[0]:
+                    return
+                done[0] = True
+                pending_edit[0] = None
+                value = entry.get().strip()
+                entry.destroy()
+                if field == 'new_name':
+                    if not value:
+                        return
+                    if re.search(r'[<>:"/\\|?*]', value):
+                        messagebox.showerror("Invalid name",
+                                             'A file name cannot contain  < > : " / \\ | ? *', parent=dialog)
+                        return
+                    # Keep the original extension if the user dropped or changed it
+                    if os.path.splitext(value)[1].lower() != c['ext'].lower():
+                        value += c['ext']
+                c[field] = value
+                c['apply'] = True
+                refresh([iid])
+
+            def cancel(event=None):
+                done[0] = True
+                pending_edit[0] = None
+                entry.destroy()
+
+            pending_edit[0] = commit
+            entry.bind('<Return>', commit)
+            entry.bind('<FocusOut>', commit)
+            entry.bind('<Escape>', cancel)
+
+        tree.bind('<Double-1>', on_double_click)
+
+        def set_all(value):
+            for c in changes:
+                c['apply'] = value
+            refresh(tree.get_children())
+
+        def on_apply():
+            if pending_edit[0]:
+                pending_edit[0]()  # keep a cell the user is still typing in
+            plan = [c for c in changes if c['apply'] and
+                    (c['new_name'] != c['old_name'] or
+                     (c['new_title'] and c['new_title'] != c['old_title']))]
+            dialog.destroy()
+            if not plan:
+                self.status_var.set("Rename: nothing selected — no files changed.")
+                return
+            threading.Thread(target=self._apply_renames_thread, args=(plan, total), daemon=True).start()
+
+        def on_cancel():
+            dialog.destroy()
+            self.status_var.set("Rename cancelled — no files changed.")
+
+        dialog.protocol("WM_DELETE_WINDOW", on_cancel)
+
+        btns = ttk.Frame(dialog)
+        btns.pack(fill=tk.X, padx=10, pady=10)
+        ttk.Button(btns, text="Select all",  command=lambda: set_all(True),  width=12).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(btns, text="Select none", command=lambda: set_all(False), width=12).pack(side=tk.LEFT)
+        ttk.Label(btns, textvariable=count_var).pack(side=tk.LEFT, padx=12)
+        ttk.Button(btns, text="Apply",  command=on_apply,  width=12).pack(side=tk.RIGHT, padx=(4, 0))
+        ttk.Button(btns, text="Cancel", command=on_cancel, width=12).pack(side=tk.RIGHT)
+
+    def _apply_renames_thread(self, plan, total):
+        """Rename files and write titles for the rows the user confirmed."""
+        ui = self.root.after
+        renamed_count = 0
+        tag_updated_count = 0
+        failed = []
+        try:
+            ui(0, self.start_feedback, "Renaming files")
+            for i, c in enumerate(plan):
+                ui(0, self.progress_var.set, int((i / len(plan)) * 100))
+                ui(0, self.status_var.set, f"{c['old_name']} — Applying: {i+1}/{len(plan)}")
+
+                filepath = os.path.join(c['dir'], c['old_name'])
+                shown = c['old_name']
+
+                if c['new_name'] != c['old_name']:
+                    new_filepath = os.path.join(c['dir'], c['new_name'])
+                    stem, ext = os.path.splitext(c['new_name'])
+                    counter = 1
+                    # A case-only rename points at the same file on Windows — not a clash
+                    while (os.path.exists(new_filepath) and
+                           os.path.normcase(new_filepath) != os.path.normcase(filepath)):
+                        new_filepath = os.path.join(c['dir'], f"{stem}_{counter}{ext}")
+                        counter += 1
                     try:
-                        from mutagen import File as MutagenFile
-                        _ext = filepath.lower().rsplit('.', 1)[-1]
-                        if _ext in ('mp3', 'mpeg', 'mpg', 'aif', 'aiff'):
-                            # Use ID3 directly to avoid "can't sync to MPEG frame" errors
-                            from mutagen.id3 import ID3, TIT2
-                            try:
-                                _id3 = ID3(filepath)
-                            except Exception:
-                                from mutagen.id3 import ID3NoHeaderError
-                                _id3 = ID3()
-                            tag_changed = False
-                            if 'TIT2' in _id3:
-                                old_title = str(_id3['TIT2'])
-                                clean_title = self._clean_string(old_title)
-                                if old_title != clean_title:
-                                    _id3['TIT2'] = TIT2(encoding=3, text=clean_title)
-                                    tag_changed = True
-                            if tag_changed:
-                                _id3.save(filepath)
-                                tag_updated_count += 1
-                        else:
-                            audio = MutagenFile(filepath, easy=True)
-                            if audio is not None:
-                                tag_changed = False
-                                if 'title' in audio and audio['title']:
-                                    old_title = audio['title'][0]
-                                    clean_title = self._clean_string(old_title)
-                                    if old_title != clean_title:
-                                        audio['title'] = clean_title
-                                        tag_changed = True
-                                if tag_changed:
-                                    audio.save()
-                                    tag_updated_count += 1
+                        os.rename(filepath, new_filepath)
+                        renamed_count += 1
+                        filepath, shown = new_filepath, os.path.basename(new_filepath)
                     except Exception as e:
-                        # Tag update failed but file might have been renamed
-                        if file_renamed:
-                            failed.append((new_filename, f"Tag update failed: {str(e)}"))
-                        else:
-                            failed.append((old_filename, f"Tag update failed: {str(e)}"))
-                            
-                except Exception as e:
-                    failed.append((os.path.basename(filepath), f"Error: {str(e)}"))
-            
-            # Complete
-            self.progress_var.set(100)
-            self.stop_feedback("Complete")
-            
-            # Show results
-            result_msg = f"File names cleaned: {renamed_count}\nTags updated: {tag_updated_count}\nTotal files processed: {len(audio_files)}"
-            
+                        failed.append((c['old_name'], f"Rename failed: {str(e)}"))
+                        continue
+
+                if c['new_title'] and c['new_title'] != c['old_title']:
+                    try:
+                        self._write_title(filepath, c['new_title'])
+                        tag_updated_count += 1
+                    except Exception as e:
+                        failed.append((shown, f"Tag update failed: {str(e)}"))
+
+            result_msg = (f"File names changed: {renamed_count}\nTitles updated: {tag_updated_count}\n"
+                          f"Files scanned: {total}")
             if failed:
                 result_msg += f"\n\nFailed: {len(failed)} files"
                 error_details = "\n".join([f"{name}: {error}" for name, error in failed[:10]])
                 if len(failed) > 10:
                     error_details += f"\n... and {len(failed) - 10} more"
                 result_msg += f"\n\nErrors:\n{error_details}"
-            
-            self.root.after(0, messagebox.showinfo, "Rename Complete", result_msg)
-            self.status_var.set(f"Rename complete: {renamed_count} files renamed, {tag_updated_count} tags updated")
-            
+
+            ui(0, self.progress_var.set, 100)
+            ui(0, self.stop_feedback, "Complete")
+            ui(0, self.status_var.set, f"Rename complete: {renamed_count} files renamed, {tag_updated_count} titles updated")
+            ui(0, messagebox.showinfo, "Rename Complete", result_msg)
+
         except Exception as e:
-            self.root.after(0, messagebox.showerror, "Rename Error", f"Error during rename process:\n\n{str(e)}")
-            self.stop_feedback("Error")
-            self.status_var.set(f"Error: {str(e)}")
+            ui(0, messagebox.showerror, "Rename Error", f"Error during rename process:\n\n{str(e)}")
+            ui(0, self.stop_feedback, "Error")
+            ui(0, self.status_var.set, f"Error: {str(e)}")
 
     def quality_check(self):
         """Analyze audio quality using spectrum analysis"""
